@@ -10,7 +10,7 @@
 #   * applies a fixed baseline (fix-ns-x-colors + system-appearance) plus every
 #     patch listed in build.yml (local / external / community), sha256-verified;
 #   * wires native-compilation (libgccjit) for both build and runtime;
-#   * builds Emacs Client.app from your no-frame emacsgui.applescript;
+#   * builds Emacs Client.app by delegating to the shared emacsgui-build.sh;
 #   * installs into a private prefix and deploys the two .app bundles.
 #
 # Usage:
@@ -39,7 +39,7 @@ PREFIX="${EMACS_PREFIX:-$HOME/.local/opt/emacs-plus}"
 BUILD_DIR="${EMACS_BUILD_DIR:-$HOME/.cache/emacs-plus}"
 APPS_DIR="${EMACS_APPS_DIR:-$HOME/Applications}"
 CFG="${EMACS_PLUS_BUILD_CONFIG:-$HOME/.config/emacs-plus/build.yml}"
-LAUNCHER_SRC="${EMACS_LAUNCHER_SRC:-$HOME/google-drive/dotfiles/.local/bin/emacsgui.applescript}"
+CLIENT_BUILD="${EMACS_CLIENT_BUILD:-$HOME/google-drive/dotfiles/.local/bin/Emacs Client/emacsgui-build.sh}"
 BASELINE_PATCHES=(fix-ns-x-colors system-appearance)
 
 SRC="$BUILD_DIR/emacs"
@@ -225,19 +225,24 @@ stage_package() {
   local res="$app/Contents/Resources"
 
   apply_icon "$res" "$app/Contents/Info.plist"
-  build_client_app "$res"
   write_site_lisp
   inject_lsenvironment "$app/Contents/Info.plist" "$app"
 
-  log "Signing (ad-hoc, required on recent macOS)"
+  log "Signing Emacs.app (ad-hoc, required on recent macOS)"
   codesign --force --deep --sign - "$app" >/dev/null 2>&1 || sub "warning: codesign Emacs.app failed"
-  codesign --force --deep --sign - "$PREFIX/Emacs Client.app" >/dev/null 2>&1 || sub "warning: codesign client failed"
 
-  log "Deploying to $APPS_DIR"
+  log "Deploying Emacs.app to $APPS_DIR"
   mkdir -p "$APPS_DIR"
-  rm -rf "$APPS_DIR/Emacs.app" "$APPS_DIR/Emacs Client.app"
+  rm -rf "$APPS_DIR/Emacs.app"
   cp -R "$app" "$APPS_DIR/Emacs.app"
-  cp -R "$PREFIX/Emacs Client.app" "$APPS_DIR/Emacs Client.app"
+
+  # Emacs Client.app: delegate to the shared launcher build (single source of
+  # truth -- bundles emacsgui, installs the dragon Assets.car, registers Launch
+  # Services, ad-hoc signs via osacompile).  emacsclient is a thin client that
+  # just talks to the daemon socket, so no build-specific repoint is needed.
+  [ -x "$CLIENT_BUILD" ] || die "client build script not found: $CLIENT_BUILD"
+  log "Building Emacs Client.app via $CLIENT_BUILD"
+  APP="$APPS_DIR/Emacs Client.app" "$CLIENT_BUILD"
 
   log "Done."
   sub "Emacs.app        -> $APPS_DIR/Emacs.app"
@@ -263,52 +268,6 @@ apply_icon() { # resources_dir info_plist
     $PB -c "Delete :CFBundleIconName" "$plist" 2>/dev/null || true
     $PB -c "Add :CFBundleIconName string ${name:-Emacs}" "$plist"
   fi
-}
-
-build_client_app() { # icons_dir (for the shared Emacs.icns)
-  local res="$1"
-  local ec="$PREFIX/bin/emacsclient"
-  local app="$PREFIX/Emacs Client.app"
-  local plist="$app/Contents/Info.plist"
-  local nspath="$HB/bin:$HB/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
-  log "Building Emacs Client.app from $LAUNCHER_SRC"
-  [ -f "$LAUNCHER_SRC" ] || die "launcher source missing: $LAUNCHER_SRC"
-
-  # Reuse the no-frame launcher logic verbatim; only repoint `property ec`.
-  local tmpscript; tmpscript="$(mktemp -t emacs-client).applescript"
-  sed -E "s#^property ec :.*#property ec : \"PATH='$nspath' $ec\"#" "$LAUNCHER_SRC" >"$tmpscript"
-
-  rm -rf "$app"
-  osacompile -o "$app" "$tmpscript"
-  rm -f "$tmpscript"
-
-  pb() { $PB -c "Set :$1 $3" "$plist" 2>/dev/null || $PB -c "Add :$1 $2 $3" "$plist"; }
-  pb CFBundleName string "Emacs Client"
-  pb CFBundleDisplayName string "Emacs Client"
-  pb CFBundleIdentifier string "com.andrea.emacs-client"
-  pb OSAAppletShowStartupScreen bool false
-
-  $PB -c "Delete :CFBundleDocumentTypes" "$plist" 2>/dev/null || true
-  $PB -c "Add :CFBundleDocumentTypes array" "$plist"
-  $PB -c "Add :CFBundleDocumentTypes:0 dict" "$plist"
-  $PB -c "Add :CFBundleDocumentTypes:0:CFBundleTypeName string Text Document" "$plist"
-  $PB -c "Add :CFBundleDocumentTypes:0:CFBundleTypeRole string Editor" "$plist"
-  $PB -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes array" "$plist"
-  local i=0 uti
-  for uti in public.text public.plain-text public.source-code public.script public.shell-script public.data; do
-    $PB -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes:$i string $uti" "$plist"; i=$((i+1))
-  done
-  $PB -c "Delete :CFBundleURLTypes" "$plist" 2>/dev/null || true
-  $PB -c "Add :CFBundleURLTypes array" "$plist"
-  $PB -c "Add :CFBundleURLTypes:0 dict" "$plist"
-  $PB -c "Add :CFBundleURLTypes:0:CFBundleURLName string Org Protocol" "$plist"
-  $PB -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes array" "$plist"
-  $PB -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string org-protocol" "$plist"
-
-  # Share the same icon as Emacs.app
-  [ -f "$res/Emacs.icns" ] && cp -f "$res/Emacs.icns" "$app/Contents/Resources/applet.icns"
-  if [ -f "$res/Assets.car" ]; then cp -f "$res/Assets.car" "$app/Contents/Resources/Assets.car"; fi
-  pb CFBundleIconFile string applet
 }
 
 write_site_lisp() {
