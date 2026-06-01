@@ -10,8 +10,11 @@
 #   * applies a fixed baseline (fix-ns-x-colors + system-appearance) plus every
 #     patch listed in build.yml (local / external / community), sha256-verified;
 #   * wires native-compilation (libgccjit) for both build and runtime;
+#   * builds a SELF-CONTAINED Emacs.app (binaries, lisp, native-lisp all inside
+#     the bundle -- no Unix prefix split);
 #   * builds Emacs Client.app by delegating to the shared emacsgui-build.sh;
-#   * installs into a private prefix and deploys the two .app bundles.
+#   * deploys both .app bundles to ~/Applications and symlinks emacs/emacsclient
+#     (from inside Emacs.app) onto PATH.
 #
 # Usage:
 #   build.sh                 # full pipeline
@@ -35,9 +38,9 @@ set -euo pipefail
 REPO="${EMACS_SRC_REPO:-/Users/andrea/Documents/Programming/Others/fork-emacs}"
 REF="${EMACS_SRC_REF:-master}"
 MAJOR="${EMACS_MAJOR:-32}"
-PREFIX="${EMACS_PREFIX:-$HOME/.local/opt/emacs-plus}"
-BUILD_DIR="${EMACS_BUILD_DIR:-$HOME/.cache/emacs-plus}"
+BUILD_DIR="${EMACS_BUILD_DIR:-$HOME/.cache/emacs-plus}"   # internal build cache (worktree + objects)
 APPS_DIR="${EMACS_APPS_DIR:-$HOME/Applications}"
+LINK_DIR="${EMACS_LINK_DIR:-$HOME/.local/bin}"            # where emacs/emacsclient symlinks go
 CFG="${EMACS_PLUS_BUILD_CONFIG:-$HOME/.config/emacs-plus/build.yml}"
 CLIENT_BUILD="${EMACS_CLIENT_BUILD:-$HOME/google-drive/dotfiles/.local/bin/Emacs Client/emacsgui-build.sh}"
 BASELINE_PATCHES=(fix-ns-x-colors system-appearance)
@@ -185,16 +188,16 @@ stage_configure() {
   export LIBRARY_PATH="$LIBRARY_PATH_VALUE"
 
   local cflags="-DFD_SETSIZE=10000 -DDARWIN_UNLIMITED_SELECT -I$SQLITE/include -I$GCC_PREFIX/include -I$GCCJIT/include -I$HB/include"
+  # Self-contained Emacs.app: everything (binaries, lisp, native-lisp, info) lands
+  # INSIDE the bundle. No --prefix / Unix split / locallisppath -- that layout only
+  # existed because emacs-plus is a Homebrew keg; this is a personal build.
   local args=(
     --disable-dependency-tracking
     --disable-silent-rules
-    --enable-locallisppath="$PREFIX/share/emacs/site-lisp"
-    --infodir="$PREFIX/share/info/emacs"
-    --prefix="$PREFIX"
     --with-native-compilation=aot
     --with-xml2 --with-gnutls --with-modules --with-rsvg --with-webp
     --without-dbus --without-imagemagick
-    --with-ns --disable-ns-self-contained
+    --with-ns
     "CFLAGS=$cflags"
   )
 
@@ -208,47 +211,97 @@ stage_configure() {
 }
 
 stage_build() {
+  # Nuke native-lisp so every build yields a single fresh <ver-hash> eln dir
+  # (no stale dirs accumulating in the worktree or bundle). Trade-off: full AOT
+  # recompile each build; the C objects stay incremental.
+  log "Clearing native-lisp (forces a full AOT recompile)"
+  rm -rf "$SRC/native-lisp"
   log "Building with gmake -j$JOBS (this is the long one)"
   ( cd "$SRC" && gmake -j"$JOBS" )
 }
 
 stage_package() {
-  log "Installing into $PREFIX"
-  rm -rf "$PREFIX"
+  log "Installing self-contained Emacs.app (gmake install)"
   ( cd "$SRC" && gmake install )
 
-  # NS build drops the app under nextstep/; move it (and AOT eln) into the prefix.
-  local app="$PREFIX/Emacs.app"
-  rm -rf "$app"
-  mv "$SRC/nextstep/Emacs.app" "$app"
-  [ -d "$SRC/native-lisp" ] && cp -R "$SRC/native-lisp" "$app/Contents/native-lisp"
-  local res="$app/Contents/Resources"
+  local app_src="$SRC/nextstep/Emacs.app"
+  # 'gmake install' byte-compiles to .elc, THEN gzips the .el sources to .el.gz a
+  # moment later -- so every bundled .el.gz ends up strictly newer than its .elc.
+  # With (setq load-prefer-newer t) in a user's config, Emacs then prefers the
+  # compressed *source*; loading jka-compr.el.gz (the decompressor itself)
+  # recurses ("Recursive load: .../jka-compr.el.gz"). Bump the .elc mtimes so they
+  # win again. (.eln native selection is keyed on the source hash, not mtime, so
+  # native-comp is unaffected.)
+  log "Bumping .elc mtimes above .el.gz (avoids load-prefer-newer jka-compr recursion)"
+  find "$app_src/Contents/Resources" -name '*.elc' -exec touch {} +
+  [ -d "$app_src" ] || die "expected self-contained app at $app_src after 'gmake install'"
+  [ -x "$app_src/Contents/MacOS/Emacs" ] || die "Emacs binary missing in $app_src"
+  local res="$app_src/Contents/Resources"
 
-  apply_icon "$res" "$app/Contents/Info.plist"
-  write_site_lisp
-  inject_lsenvironment "$app/Contents/Info.plist" "$app"
+  # Discover the in-bundle emacsclient (Contents/MacOS/bin/emacsclient per
+  # nextstep/Makefile.in; discovered, to stay version-proof).
+  local client_rel
+  client_rel="$(cd "$app_src" && find Contents -type f -name emacsclient -perm -u+x | head -1)"
+  [ -n "$client_rel" ] || die "emacsclient not found inside $app_src"
+  sub "emacsclient in bundle: $client_rel"
 
-  log "Signing Emacs.app (ad-hoc, required on recent macOS)"
-  codesign --force --deep --sign - "$app" >/dev/null 2>&1 || sub "warning: codesign Emacs.app failed"
+  # native-lisp is nuked before each build (see stage_build), so the bundle
+  # carries exactly one fresh eln dir -- nothing stale to prune here.
+  if find "$app_src/Contents" -name '*.eln' -print -quit | grep -q .; then
+    sub "native-lisp (.eln) present in bundle"
+  else
+    sub "warning: no .eln in bundle -- native-comp AOT may not have installed"
+  fi
 
-  log "Deploying Emacs.app to $APPS_DIR"
+  apply_icon "$res" "$app_src/Contents/Info.plist"
+
+  # site-start.el inside the bundle's site-lisp.
+  local sitelisp
+  sitelisp="$(find "$res" -type d -name site-lisp | head -1)"
+  [ -n "$sitelisp" ] || sitelisp="$res/site-lisp"
+  write_site_lisp "$sitelisp"
+
+  inject_lsenvironment "$app_src/Contents/Info.plist" "$app_src"
+
+  log "Signing (ad-hoc, required on recent macOS)"
+  codesign --force --deep --sign - "$app_src" >/dev/null 2>&1 || sub "warning: codesign failed"
+
+  log "Deploying to $APPS_DIR/Emacs.app"
   mkdir -p "$APPS_DIR"
-  rm -rf "$APPS_DIR/Emacs.app"
-  cp -R "$app" "$APPS_DIR/Emacs.app"
+  rm -rf "$APPS_DIR/Emacs.app"        # bounded to the named app, never a shared dir
+  cp -R "$app_src" "$APPS_DIR/Emacs.app"
+  local app="$APPS_DIR/Emacs.app"
 
-  # Emacs Client.app: delegate to the shared launcher build (single source of
-  # truth -- bundles emacsgui, installs the dragon Assets.car, registers Launch
-  # Services, ad-hoc signs via osacompile).  emacsclient is a thin client that
-  # just talks to the daemon socket, so no build-specific repoint is needed.
+  # Put the executables on PATH, replacing any prior wrappers/symlinks.
+  mkdir -p "$LINK_DIR"
+  # emacs MUST be a wrapper, not a symlink: this is a self-contained --with-ns
+  # build, so epaths are RELATIVE to the bundle and Emacs locates the .app from
+  # its launch path (_NSGetExecutablePath, which is NOT canonicalized). Launched
+  # via a symlink in $LINK_DIR, that path isn't inside the .app, bundle detection
+  # fails, and lisp/libexec resolve to bogus relative dirs ("loadup.el not
+  # found"). exec'ing the absolute in-bundle path makes detection work.
+  rm -f "$LINK_DIR/emacs"
+  cat >"$LINK_DIR/emacs" <<EOS
+#!/bin/sh
+exec "$app/Contents/MacOS/Emacs" "\$@"
+EOS
+  chmod +x "$LINK_DIR/emacs"
+  # emacsclient only talks to the daemon -- no bundle paths needed, symlink is fine.
+  ln -sfn "$app/$client_rel"          "$LINK_DIR/emacsclient"
+  sub "wrote   $LINK_DIR/emacs       -> exec Contents/MacOS/Emacs"
+  sub "linked  $LINK_DIR/emacsclient -> $client_rel"
+
+  # Emacs Client.app: delegate to the shared launcher build (bundles emacsgui,
+  # installs the dragon Assets.car, registers Launch Services, ad-hoc signs).
   [ -x "$CLIENT_BUILD" ] || die "client build script not found: $CLIENT_BUILD"
   log "Building Emacs Client.app via $CLIENT_BUILD"
   APP="$APPS_DIR/Emacs Client.app" "$CLIENT_BUILD"
 
   log "Done."
-  sub "Emacs.app        -> $APPS_DIR/Emacs.app"
+  sub "Emacs.app        -> $app"
   sub "Emacs Client.app -> $APPS_DIR/Emacs Client.app"
-  sub "binaries         -> $PREFIX/bin (emacs, emacsclient)"
-  sub "To make this the daemon, point your LaunchAgent at $PREFIX/bin/emacs --fg-daemon"
+  sub "executables      -> $LINK_DIR/{emacs,emacsclient} (symlinks into the bundle)"
+  sub "To make this the daemon, point your LaunchAgent at $LINK_DIR/emacs --fg-daemon"
 }
 
 apply_icon() { # resources_dir info_plist
@@ -270,10 +323,10 @@ apply_icon() { # resources_dir info_plist
   fi
 }
 
-write_site_lisp() {
-  local dir="$PREFIX/share/emacs/site-lisp"
+write_site_lisp() { # site-lisp dir
+  local dir="$1"
   mkdir -p "$dir"
-  log "Writing site-start.el (ns-emacs-plus-version = $MAJOR)"
+  log "Writing site-start.el -> $dir"
   cat >"$dir/site-start.el" <<EOS
 ;;; site-start.el --- Emacs Plus site initialization -*- lexical-binding: t -*-
 ;; Auto-generated by build.sh. Marks this as an Emacs Plus-compatible build.
