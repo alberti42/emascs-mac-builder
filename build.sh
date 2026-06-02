@@ -243,16 +243,21 @@ stage_package() {
   ( cd "$SRC" && gmake install )
 
   local app_src="$SRC/nextstep/Emacs.app"
-  # 'gmake install' byte-compiles to .elc, THEN gzips the .el sources to .el.gz a
-  # moment later -- so every bundled .el.gz ends up strictly newer than its .elc.
-  # With (setq load-prefer-newer t) in a user's config, Emacs then prefers the
-  # compressed *source*; loading jka-compr.el.gz (the decompressor itself)
-  # recurses ("Recursive load: .../jka-compr.el.gz"). Bump the .elc mtimes so they
-  # win again. (.eln native selection is keyed on the source hash, not mtime, so
-  # native-comp is unaffected.)
-  log "Bumping .elc mtimes above .el.gz (avoids load-prefer-newer jka-compr recursion)"
-  find "$app_src/Contents/Resources" -name '*.elc' -exec touch {} +
   [ -d "$app_src" ] || die "expected self-contained app at $app_src after 'gmake install'"
+  # 'gmake install' byte-compiles to .elc, THEN gzips the .el sources to .el.gz a
+  # moment later -- so a bundled .el.gz can end up newer than its .elc. With
+  # (setq load-prefer-newer t) in a user's config, Emacs then prefers the
+  # compressed *source*; loading jka-compr.el.gz (the decompressor itself)
+  # recurses ("Recursive load: .../jka-compr.el.gz").
+  #
+  # Pin the .el/.el.gz SOURCES into the past so every .elc is unambiguously newer.
+  # (Bumping .elc to "now" instead is racy: install writes .elc and .el.gz within
+  # the same wall-clock second, and at APFS sub-second resolution the touch
+  # intermittently still leaves a .el.gz ahead of its .elc.) .eln native selection
+  # is keyed on the source hash, not mtime, so native-comp is unaffected.
+  log "Pinning .el/.el.gz sources to epoch so .elc always wins (load-prefer-newer)"
+  find "$app_src/Contents/Resources" \( -name '*.el.gz' -o -name '*.el' \) \
+    -exec touch -t 197001020000 {} +
   [ -x "$app_src/Contents/MacOS/Emacs" ] || die "Emacs binary missing in $app_src"
   local res="$app_src/Contents/Resources"
 
@@ -289,7 +294,10 @@ stage_package() {
   log "Deploying to $APPS_DIR/Emacs.app"
   mkdir -p "$APPS_DIR"
   rm -rf "$APPS_DIR/Emacs.app"        # bounded to the named app, never a shared dir
-  cp -R "$app_src" "$APPS_DIR/Emacs.app"
+  # -p (preserve mtimes) is REQUIRED: plain 'cp -R' resets every file's mtime to
+  # copy time, which clobbers the epoch-pin on .el/.el.gz above and re-introduces
+  # the load-prefer-newer jka-compr recursion in the *deployed* app.
+  cp -Rp "$app_src" "$APPS_DIR/Emacs.app"
   local app="$APPS_DIR/Emacs.app"
 
   # Put the executables on PATH, replacing any prior wrappers/symlinks.
