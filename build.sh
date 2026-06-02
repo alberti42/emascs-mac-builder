@@ -263,8 +263,16 @@ stage_package() {
 
   inject_lsenvironment "$app_src/Contents/Info.plist" "$app_src"
 
+  relocate_native_lisp "$app_src"
+
   log "Signing (ad-hoc, required on recent macOS)"
-  codesign --force --deep --sign - "$app_src" >/dev/null 2>&1 || sub "warning: codesign failed"
+  # Sign + strict-verify; surface failure instead of swallowing it silently.
+  if codesign --force --deep --sign - "$app_src" >/dev/null 2>&1 \
+     && codesign --verify --strict "$app_src" >/dev/null 2>&1; then
+    sub "ad-hoc signature OK (strict verify passed)"
+  else
+    sub "warning: codesign/verify failed -- run 'codesign --verify --strict' for detail"
+  fi
 
   log "Deploying to $APPS_DIR/Emacs.app"
   mkdir -p "$APPS_DIR"
@@ -369,6 +377,28 @@ inject_lsenvironment() { # info_plist app
   $PB -c "Add :LSEnvironment:LIBRARY_PATH string $LIBRARY_PATH_VALUE" "$plist" 2>/dev/null || \
     $PB -c "Set :LSEnvironment:LIBRARY_PATH $LIBRARY_PATH_VALUE" "$plist"
   touch "$app"
+}
+
+relocate_native_lisp() { # app
+  # The self-contained --with-ns build installs the native-comp eln store at
+  # Contents/Frameworks/native-lisp (upstream's ns_applibdir). codesign treats
+  # every child of Contents/Frameworks as nested code (a framework/dylib to sign),
+  # but native-lisp is a plain directory tree of .eln dylibs -- so signing fails
+  # with "bundle format unrecognized" on native-lisp/<version-dir>, and the whole
+  # bundle ends up unsigned.
+  #
+  # Fix: move the store under Contents/Resources (sealed as ordinary hashed
+  # resources, never as nested bundles) and leave a relative symlink at the
+  # original path. native-comp-eln-load-path keeps pointing at
+  # Contents/Frameworks/native-lisp and resolves through the symlink transparently,
+  # so eln loading is unchanged -- but `codesign --deep` + `--verify --strict` now
+  # both succeed.
+  local app="$1" fw="$1/Contents/Frameworks/native-lisp"
+  [ -d "$fw" ] && [ ! -L "$fw" ] || return 0
+  log "Relocating native-lisp out of Frameworks (lets codesign seal the bundle)"
+  rm -rf "$app/Contents/Resources/native-lisp"
+  mv "$fw" "$app/Contents/Resources/native-lisp"
+  ln -s "../Resources/native-lisp" "$fw"
 }
 
 # Run prepare unless told to reuse the worktree as-is (SKIP_PREPARE=1). If the
