@@ -222,6 +222,20 @@ stage_build() {
   rm -rf "$SRC/native-lisp"
   log "Building with gmake -j$JOBS (this is the long one)"
   ( cd "$SRC" && gmake -j"$JOBS" )
+
+  # gmake's own AOT trigger is unreliable: the '../native-lisp' recipe only runs
+  # compile-eln-aot when the directory is absent (test ! -d), but building the
+  # dumped Emacs -- an order-only prerequisite, so it runs first -- already creates
+  # native-lisp/<verdir> for the *preloaded* set. The guard then sees the dir and
+  # silently skips the bulk AOT, leaving only a handful of elns. Drive the full AOT
+  # explicitly so the eln set for the current comp-native-version-dir is complete.
+  #
+  # This recompiles the whole tree every build (paired with the rm above): clean
+  # and predictable, no incremental-eln reuse. batch-native-compile has no skip-if-
+  # up-to-date check anyway, so reuse would require a custom driver -- deliberately
+  # not done, to keep each build's output deterministic.
+  log "Native-compiling all lisp (AOT) -- gmake's built-in trigger is unreliable here"
+  ( cd "$SRC/lisp" && gmake -j"$JOBS" compile-eln-aot EMACS="$SRC/src/emacs" ELNDONE="" )
 }
 
 stage_package() {
