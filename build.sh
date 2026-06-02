@@ -308,7 +308,12 @@ apply_icon() { # resources_dir info_plist
   local res="$1" plist="$2" line kind loc sha car name target="$1/Emacs.icns"
   line="$(resolve_icon || true)"
   [ -n "$line" ] || { sub "no icon configured"; return; }
-  IFS=$'\t' read -r kind loc sha car name <<<"$line"
+  # Split the TSV one field per line (tab->newline) instead of `IFS=$'\t' read`:
+  # tab is an IFS-whitespace char, so read would COLLAPSE the empty sha field
+  # that community icons emit, shifting car/name left and skipping the Assets.car
+  # copy below. One read per field preserves empty fields.
+  { read -r kind; read -r loc; read -r sha; read -r car; read -r name; } \
+    < <(printf '%s\n' "$line" | tr '\t' '\n')
   log "Applying icon ($kind)"
   if [ "$kind" = external ]; then
     local tmp; tmp="$(mktemp -t icon).icns"
