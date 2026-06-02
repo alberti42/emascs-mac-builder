@@ -211,9 +211,13 @@ stage_configure() {
 }
 
 stage_build() {
-  # Nuke native-lisp so every build yields a single fresh <ver-hash> eln dir
-  # (no stale dirs accumulating in the worktree or bundle). Trade-off: full AOT
-  # recompile each build; the C objects stay incremental.
+  # Remove the worktree's native-lisp so the build re-runs a full AOT compile:
+  # 'all: ../native-lisp' (src/Makefile) only fires the AOT recipe when the
+  # directory is ABSENT (the Makefile literally relies on that -- see its FIXME).
+  # This regenerates the eln set for the CURRENT comp-native-version-dir; the C
+  # objects stay incremental. NOTE: this does NOT clean the bundle -- the install
+  # target ($SRC/nextstep/Emacs.app) persists and 'install-eln' is additive, so
+  # stale version dirs are pruned later in stage_package (prune_stale_eln).
   log "Clearing native-lisp (forces a full AOT recompile)"
   rm -rf "$SRC/native-lisp"
   log "Building with gmake -j$JOBS (this is the long one)"
@@ -245,13 +249,7 @@ stage_package() {
   [ -n "$client_rel" ] || die "emacsclient not found inside $app_src"
   sub "emacsclient in bundle: $client_rel"
 
-  # native-lisp is nuked before each build (see stage_build), so the bundle
-  # carries exactly one fresh eln dir -- nothing stale to prune here.
-  if find "$app_src/Contents" -name '*.eln' -print -quit | grep -q .; then
-    sub "native-lisp (.eln) present in bundle"
-  else
-    sub "warning: no .eln in bundle -- native-comp AOT may not have installed"
-  fi
+  prune_stale_eln "$app_src"
 
   apply_icon "$res" "$app_src/Contents/Info.plist"
 
@@ -399,6 +397,38 @@ relocate_native_lisp() { # app
   rm -rf "$app/Contents/Resources/native-lisp"
   mv "$fw" "$app/Contents/Resources/native-lisp"
   ln -s "../Resources/native-lisp" "$fw"
+}
+
+prune_stale_eln() { # app
+  # 'gmake install' (install-eln) is purely ADDITIVE: it copies the worktree's
+  # native-lisp into the bundle but never removes version dirs already there. The
+  # install-target bundle ($SRC/nextstep/Emacs.app) PERSISTS across builds, so once
+  # the eln version-dir name changes (e.g. a fork-emacs change to comp-native-
+  # version-dir, like the NS_SELF_CONTAINED dot->underscore conversion), the old
+  # dir lingers and ships forever as dead weight -- Emacs only loads from the dir
+  # named by the *current* binary's comp-native-version-dir.
+  #
+  # Keep exactly that one dir; drop the rest. Also sanity-check it's populated: a
+  # near-empty dir means the full AOT didn't run (it triggers only when 'make'
+  # visits the absent ../native-lisp target -- see stage_build), and the user
+  # should do a clean build.
+  local app="$1" nl="$1/Contents/Frameworks/native-lisp" verdir d n
+  [ -d "$nl" ] || { sub "warning: no native-lisp in bundle -- native-comp AOT did not install"; return 0; }
+  verdir="$("$app/Contents/MacOS/Emacs" --batch --eval '(princ comp-native-version-dir)' 2>/dev/null)"
+  [ -n "$verdir" ] || { sub "warning: could not read comp-native-version-dir; leaving native-lisp as-is"; return 0; }
+  log "Pruning native-lisp to the live version dir ($verdir)"
+  for d in "$nl"/*/; do
+    [ -d "$d" ] || continue
+    d="${d%/}"
+    if [ "$(basename "$d")" != "$verdir" ]; then
+      sub "removing stale $(basename "$d")"
+      rm -rf "$d"
+    fi
+  done
+  [ -d "$nl/$verdir" ] || { sub "warning: live eln dir $verdir absent -- AOT produced none for this binary"; return 0; }
+  n="$(find "$nl/$verdir" -name '*.eln' | wc -l | tr -d ' ')"
+  sub "$verdir: $n .eln"
+  [ "$n" -ge 100 ] || sub "warning: only $n .eln in the live dir -- AOT likely incomplete; do a clean rebuild (build.sh prepare && build.sh) to force a full AOT"
 }
 
 # Run prepare unless told to reuse the worktree as-is (SKIP_PREPARE=1). If the
