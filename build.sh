@@ -40,7 +40,7 @@ REF="${EMACS_SRC_REF:-master}"
 MAJOR="${EMACS_MAJOR:-32}"
 BUILD_DIR="${EMACS_BUILD_DIR:-$HOME/.cache/emacs-plus}"   # internal build cache (worktree + objects)
 APPS_DIR="${EMACS_APPS_DIR:-$HOME/Applications}"
-LINK_DIR="${EMACS_LINK_DIR:-$HOME/.local/bin}"            # where emacs/emacsclient symlinks go
+BIN_DIR="${EMACS_BIN_DIR:-$HOME/.local/bin}"            # PATH bin dir for the emacs/emacsclient entry points
 CFG="${EMACS_PLUS_BUILD_CONFIG:-$HOME/.config/emacs-plus/build.yml}"
 CLIENT_BUILD="${EMACS_CLIENT_BUILD:-$HOME/google-drive/dotfiles/.local/bin/Emacs Client/emacsgui-build.sh}"
 BASELINE_PATCHES=(round-undecorated-frame fix-ns-x-colors system-appearance)
@@ -301,23 +301,23 @@ stage_package() {
   local app="$APPS_DIR/Emacs.app"
 
   # Put the executables on PATH, replacing any prior wrappers/symlinks.
-  mkdir -p "$LINK_DIR"
+  mkdir -p "$BIN_DIR"
   # emacs MUST be a wrapper, not a symlink: this is a self-contained --with-ns
   # build, so epaths are RELATIVE to the bundle and Emacs locates the .app from
   # its launch path (_NSGetExecutablePath, which is NOT canonicalized). Launched
-  # via a symlink in $LINK_DIR, that path isn't inside the .app, bundle detection
+  # via a symlink in $BIN_DIR, that path isn't inside the .app, bundle detection
   # fails, and lisp/libexec resolve to bogus relative dirs ("loadup.el not
   # found"). exec'ing the absolute in-bundle path makes detection work.
-  rm -f "$LINK_DIR/emacs"
-  cat >"$LINK_DIR/emacs" <<EOS
+  rm -f "$BIN_DIR/emacs"
+  cat >"$BIN_DIR/emacs" <<EOS
 #!/bin/sh
 exec "$app/Contents/MacOS/Emacs" "\$@"
 EOS
-  chmod +x "$LINK_DIR/emacs"
+  chmod +x "$BIN_DIR/emacs"
   # emacsclient only talks to the daemon -- no bundle paths needed, symlink is fine.
-  ln -sfn "$app/$client_rel"          "$LINK_DIR/emacsclient"
-  sub "wrote   $LINK_DIR/emacs       -> exec Contents/MacOS/Emacs"
-  sub "linked  $LINK_DIR/emacsclient -> $client_rel"
+  ln -sfn "$app/$client_rel"          "$BIN_DIR/emacsclient"
+  sub "wrote   $BIN_DIR/emacs       -> exec Contents/MacOS/Emacs"
+  sub "linked  $BIN_DIR/emacsclient -> $client_rel"
 
   # Emacs Client.app: delegate to the shared launcher build (bundles emacsgui,
   # installs the dragon Assets.car, registers Launch Services, ad-hoc signs).
@@ -328,8 +328,8 @@ EOS
   log "Done."
   sub "Emacs.app        -> $app"
   sub "Emacs Client.app -> $APPS_DIR/Emacs Client.app"
-  sub "executables      -> $LINK_DIR/{emacs,emacsclient} (symlinks into the bundle)"
-  sub "To make this the daemon, point your LaunchAgent at $LINK_DIR/emacs --fg-daemon"
+  sub "executables      -> $BIN_DIR/emacs (wrapper), $BIN_DIR/emacsclient (symlink into the bundle)"
+  sub "To make this the daemon, point your LaunchAgent at $BIN_DIR/emacs --fg-daemon"
 }
 
 apply_icon() { # resources_dir info_plist

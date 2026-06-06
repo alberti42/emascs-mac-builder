@@ -35,8 +35,10 @@ including the named one (see the `case` dispatch at the bottom of the script).
 - `EMACS_BUILD_DIR` — build cache holding the worktree + objects (default
   `~/.cache/emacs-plus`). **Persists across runs** for incremental rebuilds.
 - `EMACS_PLUS_BUILD_CONFIG` — path to `build.yml` (default `~/.config/emacs-plus/build.yml`).
-- `EMACS_APPS_DIR` / `EMACS_LINK_DIR` — deploy target (`~/Applications`) and where
-  the `emacs`/`emacsclient` entries on PATH go (`~/.local/bin`).
+- `EMACS_APPS_DIR` / `EMACS_BIN_DIR` — deploy target (`~/Applications`) and the
+  PATH bin dir where the `emacs`/`emacsclient` entry points go (`~/.local/bin`).
+  Note `emacs` is installed as a wrapper script (not a symlink) so the
+  self-contained bundle is located from its launch path; `emacsclient` is a symlink.
 - `SKIP_PREPARE=1` — reuse the worktree untouched (no reset, no re-patch).
 - `RECONFIGURE=1` — force `autogen.sh` + `./configure` to re-run.
 
