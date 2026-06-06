@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor cruft
+*~
+\#*\#
+.\#*
+*.swp
+
+# Local overrides / scratch
+*.local
+/tmp/
