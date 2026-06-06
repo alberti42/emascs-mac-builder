@@ -34,8 +34,9 @@
 # `repackage`, or SKIP_PREPARE=1, to reuse the tree untouched when the patch
 # set hasn't changed. RECONFIGURE=1 forces autogen+configure to re-run.
 #
-# SKIP_AOT=1 builds WITHOUT native compilation (byte-code only) -- a fast loop for
-# testing patches (seconds, vs ~20 min for full AOT). Tightest iteration:
+# SKIP_AOT=1 skips the BULK native compilation -- a fast loop for testing patches
+# (seconds, vs ~20 min for full AOT). The bulk lisp runs as byte-code; only the few
+# preloaded elns the dump requires are still built. Tightest iteration:
 #   SKIP_AOT=1 build.sh make   &&   ~/.cache/emacs-plus/emacs/src/emacs -Q
 # DEBUG=1 goes further: implies SKIP_AOT *and* compiles C at -O0 -g3 (no release
 # optimization, full debug symbols) for the fastest, debuggable test build. It uses
@@ -203,19 +204,25 @@ stage_configure() {
 
 stage_build() {
   if [ "${SKIP_AOT:-0}" = 1 ]; then
-    # Fast iteration build: NO native compilation -- byte-code only. For testing a
-    # patch in ~seconds instead of the full AOT's ~20 min.
-    #   * clear native-lisp so no stale .eln shadows the patched sources at runtime
-    #     (Emacs falls back to the freshly byte-compiled .elc), AND so the dir EXISTS:
-    #     src/Makefile's '../native-lisp' recipe is guarded by 'test ! -d', so an
-    #     existing (even empty) dir skips the preloaded-eln build and its extra re-dump;
-    #   * skip the bulk compile-eln-aot entirely.
-    # The binary, .elc and base .pdmp still build normally, so the result runs your
-    # patch correctly -- just as byte-code (or lazily JIT-compiled into the user
-    # eln-cache at runtime), which is irrelevant for a quick test. Fastest loop:
-    #   SKIP_AOT=1 ./build.sh build   (or 'make' to reuse the tree)  then run $SRC/src/emacs
-    log "SKIP_AOT=1 -> fast build: byte-code only, no native compilation"
+    # Fast iteration build: skip the BULK native compilation for testing a patch in
+    # ~seconds instead of the full AOT's ~20 min. NOT "byte-code only" -- an aot
+    # binary's dump still bakes in (and dlopens at startup) a minimal PRELOADED eln
+    # set, so those few ARE built; the bulk lisp just runs as byte-code (or lazily
+    # JIT-compiles into the user eln-cache at runtime), which is fine for a quick test.
+    #   * clear native-lisp first so no stale .eln from a prior build lingers, AND so
+    #     the dir EXISTS: src/Makefile's '../native-lisp' recipe is guarded by
+    #     'test ! -d', so an existing (even empty) dir skips the bulk preloaded build
+    #     and its extra re-dump;
+    #   * the base dump ($(pdmp): loadup --eln-dest) is what emits the few preloaded
+    #     elns -- but its prereqs are the binary + loaddefs, NOT native-lisp, so after
+    #     wiping native-lisp we must force the dump to rebuild or those elns won't come
+    #     back (and the dump dlopens them at startup -> broken). rm the pdmp to force it;
+    #   * skip the explicit bulk compile-eln-aot step entirely.
+    # Fastest loop: SKIP_AOT=1 ./build.sh build  (or 'make' to reuse the tree)  then
+    # run $SRC/src/emacs.  prune_stale_eln keeps the live verdir so the deploy boots.
+    log "SKIP_AOT=1 -> fast build: skip bulk AOT (preloaded elns only)"
     rm -rf "$SRC/native-lisp"; mkdir -p "$SRC/native-lisp"
+    rm -f "$SRC/src/emacs.pdmp"
     log "Building with gmake -j$JOBS"
     ( cd "$SRC" && gmake -j"$JOBS" )
     return
@@ -451,14 +458,12 @@ prune_stale_eln() { # app
   # near-empty dir means the full AOT didn't run (it triggers only when 'make'
   # visits the absent ../native-lisp target -- see stage_build), and the user
   # should do a clean build.
+  # NOTE: even a SKIP_AOT build keeps the live verdir -- an aot binary's dump always
+  # bakes in a minimal PRELOADED eln set (e.g. ns-win.eln) that it dlopens at startup,
+  # so the live verdir must ship intact or the app won't boot. We only drop OTHER
+  # (stale) verdirs here; SKIP_AOT just means the live dir holds the preloaded handful
+  # rather than the full set.
   local app="$1" nl="$1/Contents/Frameworks/native-lisp" verdir d n
-  if [ "${SKIP_AOT:-0}" = 1 ]; then
-    # Fast build ships no AOT .eln. Strip any left over from a prior full build so
-    # the deployed app runs the patched byte-code, not stale native code.
-    [ -d "$nl" ] && rm -rf "$nl"/*
-    sub "SKIP_AOT: byte-code-only build, bundle ships no .eln"
-    return 0
-  fi
   [ -d "$nl" ] || { sub "warning: no native-lisp in bundle -- native-comp AOT did not install"; return 0; }
   verdir="$("$app/Contents/MacOS/Emacs" --batch --eval '(princ comp-native-version-dir)' 2>/dev/null)"
   [ -n "$verdir" ] || { sub "warning: could not read comp-native-version-dir; leaving native-lisp as-is"; return 0; }
@@ -474,7 +479,11 @@ prune_stale_eln() { # app
   [ -d "$nl/$verdir" ] || { sub "warning: live eln dir $verdir absent -- AOT produced none for this binary"; return 0; }
   n="$(find "$nl/$verdir" -name '*.eln' | wc -l | tr -d ' ')"
   sub "$verdir: $n .eln"
-  [ "$n" -ge 100 ] || sub "warning: only $n .eln in the live dir -- AOT likely incomplete; do a clean rebuild (build.sh prepare && build.sh) to force a full AOT"
+  if [ "${SKIP_AOT:-0}" = 1 ]; then
+    sub "SKIP_AOT: preloaded elns only; the bulk lisp runs as byte-code"
+  elif [ "$n" -lt 100 ]; then
+    sub "warning: only $n .eln in the live dir -- AOT likely incomplete; do a clean rebuild (build.sh prepare && build.sh) to force a full AOT"
+  fi
 }
 
 # Run prepare unless told to reuse the worktree as-is (SKIP_PREPARE=1). If the

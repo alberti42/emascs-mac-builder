@@ -102,13 +102,15 @@ interactions. The long comments above each are the source of truth — **do not
   gmake's built-in `../native-lisp` AOT trigger only fires when the directory is
   absent and the dumped-Emacs step already recreates it — leaving most lisp
   uncompiled. `prune_stale_eln` later verifies the live version-dir has ≥100 `.eln`.
-- **`SKIP_AOT=1` fast path** (`stage_build`): skips native compilation entirely for
-  quick patch testing (seconds vs ~20 min). It clears `native-lisp/` then `mkdir`s it
-  empty — empty because no stale `.eln` may shadow the patched sources (Emacs falls
-  back to fresh `.elc`), and existing because `src/Makefile`'s `../native-lisp` recipe
-  is guarded by `test ! -d`, so a present dir skips even the preloaded-eln build and
-  its re-dump. The binary/`.elc`/base `.pdmp` still build. `prune_stale_eln` strips
-  any bundle `.eln` in this mode. Use a full build (default) for anything shipped.
+- **`SKIP_AOT=1` fast path** (`stage_build`): skips the **bulk** native compilation for
+  quick patch testing (seconds vs ~20 min). NOT "byte-code only": an aot binary's dump
+  bakes in (and `dlopen`s at startup) a minimal **preloaded** eln set, so those few are
+  always built — only the bulk is skipped, and the rest of the lisp runs as byte-code.
+  It clears `native-lisp/` then `mkdir`s it empty (clears stale elns; the present dir
+  makes `src/Makefile`'s `test ! -d`-guarded `../native-lisp` recipe skip the bulk
+  preloaded build + re-dump — the base dump still emits the few elns it needs).
+  `prune_stale_eln` must **keep the live verdir** (those preloaded elns), or the
+  deployed app won't boot — stripping them was a bug. Full build (default) for shipped.
 - **`DEBUG=1` fast/debug build**: implies `SKIP_AOT`, and compiles C at `-O0 -g3` (no
   release optimization, full symbols) instead of the release `-O` (which Emacs's
   configure appends because the base `CFLAGS` carries no `-O`/`-g`). It builds in its
