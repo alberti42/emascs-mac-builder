@@ -1,7 +1,7 @@
 # emacs-mac-builder
 
 A standalone Bash pipeline that builds a self-contained, natively-compiled
-`Emacs.app` (plus `Emacs Client.app`) for macOS from a local Emacs git checkout.
+`Emacs.app` for macOS from a local Emacs git checkout.
 
 It is inspired by — but fully independent of — the
 [d12frosted/emacs-plus](https://github.com/d12frosted/homebrew-emacs-plus)
@@ -18,7 +18,7 @@ interchangeable.
 ./build.sh prepare    # export source + apply patches only
 ./build.sh configure  # ... through ./configure
 ./build.sh build      # ... through gmake (the long step)
-./build.sh package    # install + icon + client app + sign + deploy
+./build.sh package    # install + icon + sign + deploy
 ```
 
 Stages are cumulative and ordered; each runs every stage up to and including the

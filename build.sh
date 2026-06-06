@@ -12,8 +12,10 @@
 #   * wires native-compilation (libgccjit) for both build and runtime;
 #   * builds a SELF-CONTAINED Emacs.app (binaries, lisp, native-lisp all inside
 #     the bundle -- no Unix prefix split);
-#   * builds Emacs Client.app by delegating to the shared emacsgui-build.sh;
-#   * deploys both .app bundles to ~/Applications and symlinks emacs/emacsclient
+#   * applies the app icon from a loose .icon under ./assets/icons when build.yml
+#     names a locally-bundled icon (compiled to Assets.car via actool), else falls
+#     back to the emacs-plus tap;
+#   * deploys Emacs.app to ~/Applications and symlinks emacs/emacsclient
 #     (from inside Emacs.app) onto PATH.
 #
 # Usage:
@@ -21,7 +23,7 @@
 #   build.sh prepare         # export master + apply patches only
 #   build.sh configure       # ... through ./configure (validates the toolchain)
 #   build.sh build           # ... through gmake (the long step)
-#   build.sh package         # install + icon + client app + sign + deploy
+#   build.sh package         # install + icon + sign + deploy
 #   build.sh make            # resume: gmake on the worktree AS-IS, no reset/re-patch
 #   build.sh repackage       # package the worktree AS-IS, no reset/re-patch/rebuild churn
 #
@@ -42,8 +44,12 @@ BUILD_DIR="${EMACS_BUILD_DIR:-$HOME/.cache/emacs-plus}"   # internal build cache
 APPS_DIR="${EMACS_APPS_DIR:-$HOME/Applications}"
 BIN_DIR="${EMACS_BIN_DIR:-$HOME/.local/bin}"            # PATH bin dir for the emacs/emacsclient entry points
 CFG="${EMACS_PLUS_BUILD_CONFIG:-$HOME/.config/emacs-plus/build.yml}"
-CLIENT_BUILD="${EMACS_CLIENT_BUILD:-$HOME/google-drive/dotfiles/.local/bin/Emacs Client/emacsgui-build.sh}"
 BASELINE_PATCHES=(round-undecorated-frame fix-ns-x-colors system-appearance)
+
+# This script's own directory, so it can find its bundled ./assets (loose icon
+# sources) regardless of where it's invoked from.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ICONS_DIR="${EMACS_ICONS_DIR:-$SCRIPT_DIR/assets/icons}"   # loose <name>.icon sources compiled at build time
 
 SRC="$BUILD_DIR/emacs"
 HB="$(brew --prefix)"
@@ -319,21 +325,48 @@ EOS
   sub "wrote   $BIN_DIR/emacs       -> exec Contents/MacOS/Emacs"
   sub "linked  $BIN_DIR/emacsclient -> $client_rel"
 
-  # Emacs Client.app: delegate to the shared launcher build (bundles emacsgui,
-  # installs the dragon Assets.car, registers Launch Services, ad-hoc signs).
-  [ -x "$CLIENT_BUILD" ] || die "client build script not found: $CLIENT_BUILD"
-  log "Building Emacs Client.app via $CLIENT_BUILD"
-  APP="$APPS_DIR/Emacs Client.app" "$CLIENT_BUILD"
-
   log "Done."
-  sub "Emacs.app        -> $app"
-  sub "Emacs Client.app -> $APPS_DIR/Emacs Client.app"
-  sub "executables      -> $BIN_DIR/emacs (wrapper), $BIN_DIR/emacsclient (symlink into the bundle)"
+  sub "Emacs.app    -> $app"
+  sub "executables  -> $BIN_DIR/emacs (wrapper), $BIN_DIR/emacsclient (symlink into the bundle)"
   sub "To make this the daemon, point your LaunchAgent at $BIN_DIR/emacs --fg-daemon"
+}
+
+# Compile a loose <name>.icon (Icon Composer source) into the bundle with actool:
+# Assets.car for the macOS 26 "Tahoe" app icon, plus an .icns for older macOS.
+# The .icon basename IS the icon name, which CFBundleIconName must point at. The
+# .car is GENERATED here, never committed -- assets/icons holds only loose source.
+compile_icon() { # icon_dir res plist
+  local ic="$1" res="$2" plist="$3" name; name="$(basename "$ic" .icon)"
+  # actool ships only with FULL Xcode, not the Command Line Tools.
+  local actool; actool="$(xcrun --find actool 2>/dev/null || true)"
+  [ -n "$actool" ] || die "actool not found -- full Xcode required to compile $ic (install Xcode, then 'sudo xcode-select -s /Applications/Xcode.app')"
+  log "Applying icon (local $name via actool)"
+  local tmp; tmp="$(mktemp -d)"
+  "$actool" "$ic" \
+    --compile "$tmp" \
+    --platform macosx \
+    --minimum-deployment-target 11.0 \
+    --app-icon "$name" \
+    --output-partial-info-plist "$tmp/partial.plist" \
+    --enable-icon-stack-fallback-generation=disabled >/dev/null \
+    || die "actool failed to compile $ic"
+  [ -f "$tmp/Assets.car" ] || die "actool produced no Assets.car for $ic"
+  cp -f "$tmp/Assets.car" "$res/Assets.car"
+  [ -f "$tmp/$name.icns" ] && cp -f "$tmp/$name.icns" "$res/Emacs.icns"   # pre-Tahoe fallback
+  $PB -c "Delete :CFBundleIconName" "$plist" 2>/dev/null || true
+  $PB -c "Add :CFBundleIconName string $name" "$plist"
+  rm -rf "$tmp"
 }
 
 apply_icon() { # resources_dir info_plist
   local res="$1" plist="$2" line kind loc sha car name target="$1/Emacs.icns"
+  # Prefer a locally-bundled loose .icon matching build.yml's `icon:` (fully
+  # contained, compiled via actool); otherwise fall back to the emacs-plus tap.
+  local key; key="$(CFG="$CFG" ruby -ryaml -e 'c=YAML.safe_load(File.read(ENV["CFG"]))||{}; i=c["icon"]; print(i.is_a?(String) ? i : "")')"
+  if [ -n "$key" ] && [ -d "$ICONS_DIR/$key.icon" ]; then
+    compile_icon "$ICONS_DIR/$key.icon" "$res" "$plist"
+    return
+  fi
   line="$(resolve_icon || true)"
   [ -n "$line" ] || { sub "no icon configured"; return; }
   # Split the TSV one field per line (tab->newline) instead of `IFS=$'\t' read`:

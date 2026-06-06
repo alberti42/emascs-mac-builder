@@ -5,8 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `build.sh` is a single self-contained Bash pipeline that builds a self-contained,
-natively-compiled `Emacs.app` (and `Emacs Client.app`) for macOS from a local
-Emacs git checkout. It is independent of, but deliberately interchangeable with,
+natively-compiled `Emacs.app` for macOS from a local Emacs git checkout. It is
+independent of, but deliberately interchangeable with,
 [d12frosted/emacs-plus](https://github.com/d12frosted/homebrew-emacs-plus): it
 reads the **same `build.yml` schema** and reuses the emacs-plus Homebrew tap as a
 registry for baseline patches, community patches, and icons.
@@ -20,7 +20,7 @@ There are no tests, no lint config, and no build system — the repo *is* the sc
 ./build.sh prepare    # export ref into worktree + apply patches
 ./build.sh configure  # ... + ./configure (validates the toolchain)
 ./build.sh build      # ... + gmake + explicit AOT native-compile (the long step)
-./build.sh package    # ... + install, icon, sign, deploy, build client app
+./build.sh package    # ... + install, icon, sign, deploy
 ./build.sh make       # resume: gmake on the worktree AS-IS (no reset/re-patch)
 ./build.sh repackage  # package the worktree AS-IS (no reset/re-patch/rebuild)
 ```
@@ -45,9 +45,11 @@ including the named one (see the `case` dispatch at the bottom of the script).
 ### Build host prerequisites
 
 Homebrew `gcc-N` + `libgccjit` (native-comp), `ruby` (YAML/JSON parsing of
-`build.yml`), and the `d12frosted/homebrew-emacs-plus` tap checked out locally
-(used for baseline patches and the community patch/icon registry). The script
-`die()`s early if `build.yml` or the tap is missing.
+`build.yml`), the `d12frosted/homebrew-emacs-plus` tap checked out locally
+(used for baseline patches and the community patch/icon registry), and **full
+Xcode** (not just the Command Line Tools) when the configured icon is a locally
+bundled `.icon` — `compile_icon` runs `actool`. The script `die()`s early if
+`build.yml` or the tap is missing, and `compile_icon` `die()`s if `actool` is absent.
 
 ## Architecture
 
@@ -64,6 +66,21 @@ The script is organized as **resolvers → stages → dispatch**:
   `prune_stale_eln`).
 - **Dispatch** maps the CLI target to the cumulative chain of stages; `run_prepare`
   wraps `stage_prepare` to honor `SKIP_PREPARE`.
+
+This repo builds **only `Emacs.app`** (plus the `emacs`/`emacsclient` CLI entries).
+It does not build any client/launcher app — that lives in a separate project.
+
+### The `./assets` directory and the icon
+
+`assets/icons/` holds **loose `.icon` sources only** (Icon Composer documents:
+`icon.json` + image layers); no compiled `.car` is committed. When `build.yml`'s
+`icon:` names a locally bundled icon (e.g. `icon: dragon-plus` ↔
+`assets/icons/dragon-plus.icon`, resolved via `SCRIPT_DIR`/`EMACS_ICONS_DIR`),
+`apply_icon` calls `compile_icon`, which runs `actool` to produce `Assets.car`
+(macOS 26 "Tahoe" app icon) + an `.icns` for older macOS and sets `CFBundleIconName`
+to the `.icon` basename. If no local `.icon` matches, `apply_icon` falls back to the
+existing tap/external resolution (`resolve_icon`). The dragon-plus icon is
+redistributed from emacs-plus; see `assets/README.md` for attribution.
 
 ### Things that look wrong but are load-bearing
 
@@ -108,5 +125,5 @@ interactions. The long comments above each are the source of truth — **do not
 
 - `set -euo pipefail` throughout; use `die()` for fatal errors, `log()`/`sub()` for
   the structured colored output. Match this style for any new code.
-- `Emacs Client.app` is built by delegating to an external `emacsgui-build.sh`
-  (`EMACS_CLIENT_BUILD`), which lives outside this repo.
+- Icons are loose `.icon` sources under `assets/icons/`, compiled at build time
+  (see the architecture section). Never commit a generated `Assets.car`.
