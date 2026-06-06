@@ -43,7 +43,7 @@ APPS_DIR="${EMACS_APPS_DIR:-$HOME/Applications}"
 LINK_DIR="${EMACS_LINK_DIR:-$HOME/.local/bin}"            # where emacs/emacsclient symlinks go
 CFG="${EMACS_PLUS_BUILD_CONFIG:-$HOME/.config/emacs-plus/build.yml}"
 CLIENT_BUILD="${EMACS_CLIENT_BUILD:-$HOME/google-drive/dotfiles/.local/bin/Emacs Client/emacsgui-build.sh}"
-BASELINE_PATCHES=(fix-ns-x-colors system-appearance)
+BASELINE_PATCHES=(round-undecorated-frame fix-ns-x-colors system-appearance)
 
 SRC="$BUILD_DIR/emacs"
 HB="$(brew --prefix)"
