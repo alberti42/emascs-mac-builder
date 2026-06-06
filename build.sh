@@ -37,6 +37,9 @@
 # SKIP_AOT=1 builds WITHOUT native compilation (byte-code only) -- a fast loop for
 # testing patches (seconds, vs ~20 min for full AOT). Tightest iteration:
 #   SKIP_AOT=1 build.sh make   &&   ~/.cache/emacs-plus/emacs/src/emacs -Q
+# DEBUG=1 goes further: implies SKIP_AOT *and* compiles C at -O0 -g3 (no release
+# optimization, full debug symbols) for the fastest, debuggable test build. Switching
+# DEBUG on/off triggers a one-time reconfigure + full C rebuild (CFLAGS change).
 set -euo pipefail
 
 # ---------------------------------------------------------------- configuration
@@ -65,6 +68,10 @@ die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ -f "$CFG" ] || die "build.yml not found: $CFG"
 command -v python3 >/dev/null || die "python3 required (build.yml is read by scripts/build-config.py)"
+
+# DEBUG=1 is the fast test build: -O0 + full symbols (stage_configure) and, since
+# native compilation dwarfs everything, it implies SKIP_AOT (no eln) too.
+[ "${DEBUG:-0}" = 1 ] && SKIP_AOT=1
 
 # gcc / libgccjit discovery (the fiddly native-comp bits)
 GCC_MAJOR="$(/bin/ls "$HB"/bin/gcc-* 2>/dev/null | sed -n 's#.*/gcc-\([0-9][0-9]*\)$#\1#p' | sort -n | tail -1)"
@@ -144,7 +151,9 @@ stage_prepare() {
 }
 
 stage_configure() {
-  log "Configuring (native-compilation=aot, gcc-$GCC_MAJOR)"
+  local opt_mode=release
+  [ "${DEBUG:-0}" = 1 ] && opt_mode=debug
+  log "Configuring (opt=$opt_mode, native-compilation=aot, gcc-$GCC_MAJOR)"
   export PKG_CONFIG_PATH="$HB/lib/pkgconfig:$HB/share/pkgconfig"
   local dep d
   for dep in gnutls librsvg little-cms2 tree-sitter webp sqlite zlib libxml2 jpeg gmp; do
@@ -155,6 +164,10 @@ stage_configure() {
   export LIBRARY_PATH="$LIBRARY_PATH_VALUE"
 
   local cflags="-DFD_SETSIZE=10000 -DDARWIN_UNLIMITED_SELECT -I$SQLITE/include -I$GCC_PREFIX/include -I$GCCJIT/include -I$HB/include"
+  # DEBUG=1: skip release optimization and keep full symbols -- a fast, debuggable
+  # test build. Explicit -O0 also stops Emacs's configure from appending its default
+  # -O (the release build has no -O/-g of its own, so configure adds -O = -O1).
+  [ "$opt_mode" = debug ] && cflags="$cflags -O0 -g3"
   # Self-contained Emacs.app: everything (binaries, lisp, native-lisp, info) lands
   # INSIDE the bundle. No --prefix / Unix split / locallisppath -- that layout only
   # existed because emacs-plus is a Homebrew keg; this is a personal build.
@@ -170,8 +183,15 @@ stage_configure() {
 
   ( cd "$SRC"
     [ -x ./configure ] || { log "autogen.sh"; ./autogen.sh; }
-    if [ ! -f Makefile ] || [ "${RECONFIGURE:-0}" = 1 ]; then
+    # Reconfigure when the optimization mode changed since last time, else the old
+    # Makefile's CFLAGS (and -O level) would silently persist. .build-opt-mode records it.
+    reconf="${RECONFIGURE:-0}"
+    if [ -f .build-opt-mode ] && [ "$(cat .build-opt-mode)" != "$opt_mode" ]; then
+      sub "opt mode changed ($(cat .build-opt-mode) -> $opt_mode) -- forcing reconfigure"; reconf=1
+    fi
+    if [ ! -f Makefile ] || [ "$reconf" = 1 ]; then
       ./configure "${args[@]}"
+      printf '%s\n' "$opt_mode" > .build-opt-mode
     else
       sub "Makefile present -- skipping configure (RECONFIGURE=1 to force)"
     fi )
