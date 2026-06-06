@@ -169,10 +169,14 @@ stage_configure() {
   export LIBRARY_PATH="$LIBRARY_PATH_VALUE"
 
   local cflags="-DFD_SETSIZE=10000 -DDARWIN_UNLIMITED_SELECT -I$SQLITE/include -I$GCC_PREFIX/include -I$GCCJIT/include -I$HB/include"
-  # DEBUG=1: skip release optimization and keep full symbols -- a fast, debuggable
-  # test build. Explicit -O0 also stops Emacs's configure from appending its default
-  # -O (the release build has no -O/-g of its own, so configure adds -O = -O1).
-  [ "$opt_mode" = debug ] && cflags="$cflags -O0 -g3"
+  # Optimization: release uses -O2 to match emacs-plus (which gets it from Homebrew's
+  # superenv; outside that env, Emacs's configure would otherwise only add -O = -O1).
+  # DEBUG skips optimization and keeps full symbols for a fast, debuggable test build.
+  if [ "$opt_mode" = debug ]; then
+    cflags="$cflags -O0 -g3"
+  else
+    cflags="$cflags -O2"
+  fi
   # Self-contained Emacs.app: everything (binaries, lisp, native-lisp, info) lands
   # INSIDE the bundle. No --prefix / Unix split / locallisppath -- that layout only
   # existed because emacs-plus is a Homebrew keg; this is a personal build.
