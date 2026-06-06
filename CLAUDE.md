@@ -102,6 +102,13 @@ interactions. The long comments above each are the source of truth — **do not
   gmake's built-in `../native-lisp` AOT trigger only fires when the directory is
   absent and the dumped-Emacs step already recreates it — leaving most lisp
   uncompiled. `prune_stale_eln` later verifies the live version-dir has ≥100 `.eln`.
+- **`SKIP_AOT=1` fast path** (`stage_build`): skips native compilation entirely for
+  quick patch testing (seconds vs ~20 min). It clears `native-lisp/` then `mkdir`s it
+  empty — empty because no stale `.eln` may shadow the patched sources (Emacs falls
+  back to fresh `.elc`), and existing because `src/Makefile`'s `../native-lisp` recipe
+  is guarded by `test ! -d`, so a present dir skips even the preloaded-eln build and
+  its re-dump. The binary/`.elc`/base `.pdmp` still build. `prune_stale_eln` strips
+  any bundle `.eln` in this mode. Use a full build (default) for anything shipped.
 - **Epoch-pinning `.el`/`.el.gz`** (`stage_package`): `gmake install` can leave a
   `.el.gz` newer than its `.elc`; with `load-prefer-newer`, Emacs then tries to
   load compressed source and recurses on `jka-compr`. Sources are touched to
