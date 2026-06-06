@@ -38,10 +38,10 @@
 # (seconds, vs ~20 min for full AOT). The bulk lisp runs as byte-code; only the few
 # preloaded elns the dump requires are still built. Tightest iteration:
 #   SKIP_AOT=1 build.sh make   &&   ~/.cache/emacs-plus/emacs/src/emacs -Q
-# DEBUG=1 goes further: implies SKIP_AOT *and* compiles C at -O0 -g3 (no release
-# optimization, full debug symbols) for the fastest, debuggable test build. It uses
-# its OWN worktree ($EMACS_BUILD_DIR/emacs-debug) -- like an IDE's separate Debug/
-# Release dirs -- so switching modes never churns the other build's object files.
+# DEBUG=1 goes further: implies SKIP_AOT, compiles C at -O0 -g3 (no release
+# optimization, full debug symbols), and installs uncompressed .el (no gzip pass).
+# It uses its OWN worktree ($EMACS_BUILD_DIR/emacs-debug) -- like an IDE's separate
+# Debug/Release dirs -- so switching modes never churns the other build's objects.
 set -euo pipefail
 
 # ---------------------------------------------------------------- configuration
@@ -190,6 +190,10 @@ stage_configure() {
     --with-ns
     "CFLAGS=$cflags"
   )
+  # DEBUG: don't gzip the installed .el sources. Saves the gzip pass in 'gmake install'
+  # and, with no .el.gz, the .elc-vs-.el.gz mtime dance in stage_package is moot. (The
+  # release default keeps compression for a smaller bundle.)
+  [ "$opt_mode" = debug ] && args+=(--without-compress-install)
 
   # Each mode has its own worktree, so a dir is only ever one optimization mode --
   # no flip detection needed; a fresh dir configures itself for its mode.
@@ -285,9 +289,17 @@ stage_package() {
   # the .elc are unambiguously newest, with natural timestamps (no epoch-pinned dates).
   # .eln native selection is keyed on the source hash, not mtime, so it's unaffected.
   # (cp -Rp at deploy preserves this ordering; plain cp -R would flatten it.)
-  log "Bumping .elc mtimes so they win over .el.gz (load-prefer-newer)"
-  sleep 1
-  find "$app_src/Contents/Resources" -name '*.elc' -exec touch {} +
+  #
+  # Only needed when compression is on: with --without-compress-install (DEBUG) there
+  # are no .el.gz, install leaves .elc newer than the plain .el anyway, and we skip the
+  # bump (and its sleep) entirely.
+  if [ -n "$(find "$app_src/Contents/Resources" -name '*.el.gz' -print 2>/dev/null | head -1)" ]; then
+    log "Bumping .elc mtimes so they win over .el.gz (load-prefer-newer)"
+    sleep 1
+    find "$app_src/Contents/Resources" -name '*.elc' -exec touch {} +
+  else
+    sub "no .el.gz in bundle (compress-install off) -- .elc already newer, skipping mtime bump"
+  fi
   [ -x "$app_src/Contents/MacOS/Emacs" ] || die "Emacs binary missing in $app_src"
   local res="$app_src/Contents/Resources"
 

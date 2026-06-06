@@ -114,19 +114,23 @@ interactions. The long comments above each are the source of truth — **do not
   SKIP_AOT build skips it so a no-op stays ~bare-`make` fast. `prune_stale_eln` must
   **keep the live verdir** (those preloaded elns), or the deployed app won't boot —
   stripping them was a bug. Full build (default) for anything shipped.
-- **`DEBUG=1` fast/debug build**: implies `SKIP_AOT`, and compiles C at `-O0 -g3` (no
+- **`DEBUG=1` fast/debug build**: implies `SKIP_AOT`; compiles C at `-O0 -g3` (no
   release optimization, full symbols) instead of the release `-O` (which Emacs's
-  configure appends because the base `CFLAGS` carries no `-O`/`-g`). It builds in its
-  **own worktree** (`$EMACS_BUILD_DIR/emacs-debug`, vs release's `…/emacs`) — like an
-  IDE's separate Debug/Release dirs — so each mode keeps its own incremental objects
-  and switching never triggers a rebuild. `SRC` is derived from the mode. Both modes
-  share the venv and currently deploy to the same `Emacs.app` target.
+  configure appends because the base `CFLAGS` carries no `-O`/`-g`); and passes
+  `--without-compress-install` (uncompressed `.el`, no gzip pass — so the
+  `.elc` mtime bump is skipped too, see below). It builds in its **own worktree**
+  (`$EMACS_BUILD_DIR/emacs-debug`, vs release's `…/emacs`) — like an IDE's separate
+  Debug/Release dirs — so each mode keeps its own incremental objects and switching
+  never triggers a rebuild. `SRC` is derived from the mode. Both modes share the venv
+  and currently deploy to the same `Emacs.app` target. Changing what configure args a
+  mode passes needs `RECONFIGURE=1` once on an already-configured worktree.
 - **`.elc` mtime bump** (`stage_package`): `gmake install` can leave a `.el.gz`
   newer than its `.elc`; with `load-prefer-newer`, Emacs then tries to load
   compressed source and recurses on `jka-compr`. Fixed by `sleep 1` (into a strictly
   later whole second — a same-second touch is racy) then `touch`ing every `.elc` so
   it wins, with natural timestamps. The deploy `cp -Rp` preserves the ordering —
-  plain `cp -R` would flatten it.
+  plain `cp -R` would flatten it. Skipped entirely when the bundle has no `.el.gz`
+  (i.e. `DEBUG`/`--without-compress-install`) — `.elc` is already newer than plain `.el`.
 - **`emacs` on PATH is a wrapper, not a symlink**: a self-contained `--with-ns`
   build locates its bundle from the launch path, which isn't canonicalized; a
   symlink outside the bundle breaks bundle detection ("loadup.el not found"). The
