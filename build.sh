@@ -220,11 +220,22 @@ stage_build() {
     #   * skip the explicit bulk compile-eln-aot step entirely.
     # Fastest loop: SKIP_AOT=1 ./build.sh build  (or 'make' to reuse the tree)  then
     # run $SRC/src/emacs.  prune_stale_eln keeps the live verdir so the deploy boots.
+    #
+    # The wipe + forced dump rebuild above is only NEEDED on the FIRST skip-AOT build
+    # of a worktree, or when switching from a full-AOT build (whose bulk elns would
+    # shadow the patched sources). On a repeat skip-AOT build nothing stale exists, so
+    # skip it (~5s saved) and let gmake do its normal incremental work -- a no-op then
+    # stays ~as fast as bare `make`. The last mode is recorded in $SRC/.aot-mode.
     log "SKIP_AOT=1 -> fast build: skip bulk AOT (preloaded elns only)"
-    rm -rf "$SRC/native-lisp"; mkdir -p "$SRC/native-lisp"
-    rm -f "$SRC/src/emacs.pdmp"
+    mkdir -p "$SRC/native-lisp"   # ensure it exists so the bulk ../native-lisp recipe stays skipped
+    if [ "$(cat "$SRC/.aot-mode" 2>/dev/null)" != skip ]; then
+      sub "first skip-AOT build here -> clearing native-lisp + forcing a clean byte-code dump"
+      rm -rf "$SRC/native-lisp"; mkdir -p "$SRC/native-lisp"
+      rm -f "$SRC/src/emacs.pdmp"
+    fi
     log "Building with gmake -j$JOBS"
     ( cd "$SRC" && gmake -j"$JOBS" )
+    echo skip > "$SRC/.aot-mode"
     return
   fi
 
@@ -253,6 +264,7 @@ stage_build() {
   # not done, to keep each build's output deterministic.
   log "Native-compiling all lisp (AOT) -- gmake's built-in trigger is unreliable here"
   ( cd "$SRC/lisp" && gmake -j"$JOBS" compile-eln-aot EMACS="$SRC/src/emacs" ELNDONE="" )
+  echo aot > "$SRC/.aot-mode"   # so a later SKIP_AOT build knows to clear this bulk
 }
 
 stage_package() {
