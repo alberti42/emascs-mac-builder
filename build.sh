@@ -48,6 +48,7 @@ CFG="${EMACS_PLUS_BUILD_CONFIG:-$HOME/.config/emacs-plus/build.yml}"
 # sources) regardless of where it's invoked from.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ICONS_DIR="${EMACS_ICONS_DIR:-$SCRIPT_DIR/assets/icons}"   # loose <name>.icon sources compiled at build time
+PY_VENV="${EMACS_PY_VENV:-$BUILD_DIR/venv}"                # venv (pinned PyYAML) for the build.yml reader
 
 SRC="$BUILD_DIR/emacs"
 HB="$(brew --prefix)"
@@ -59,7 +60,7 @@ sub()  { printf '    %s\n' "$*"; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ -f "$CFG" ] || die "build.yml not found: $CFG"
-command -v ruby >/dev/null || die "ruby required for YAML parsing"
+command -v python3 >/dev/null || die "python3 required (build.yml is read by scripts/build-config.py)"
 
 # gcc / libgccjit discovery (the fiddly native-comp bits)
 GCC_MAJOR="$(/bin/ls "$HB"/bin/gcc-* 2>/dev/null | sed -n 's#.*/gcc-\([0-9][0-9]*\)$#\1#p' | sort -n | tail -1)"
@@ -75,33 +76,26 @@ LIBRARY_PATH_VALUE=""
 [ -n "$emutls_file" ] && LIBRARY_PATH_VALUE="$(dirname "$emutls_file")"
 LIBRARY_PATH_VALUE="${LIBRARY_PATH_VALUE:+$LIBRARY_PATH_VALUE:}$HB/lib/gcc/current:$HB/lib"
 
-# ------------------------------------------------------- build.yml: patch resolver
-# Each patch is {name: {url, sha256}}; a url starting with / ./ ../ ~ is a local
-# file, anything else is downloaded. Emits TSV: kind<TAB>name<TAB>path_or_url<TAB>sha256
-resolve_patches() {
-  CFG="$CFG" ruby -ryaml -e '
-    cfg = YAML.safe_load(File.read(ENV["CFG"]), permitted_classes: [Symbol]) || {}
-    home = Dir.home; cfgdir = File.dirname(ENV["CFG"])
-    local = ->(u){ %w[/ ./ ../ ~].any? { |p| u.start_with?(p) } }
-    (cfg["patches"] || []).each do |p|
-      abort "patch entry must be {name: {url, sha256}}: #{p.inspect}" unless p.is_a?(Hash)
-      name = p.keys.first; spec = p[name] || {}
-      abort "patch #{name}: url+sha256 required" unless spec["url"] && spec["sha256"]
-      url = spec["url"]
-      if local.call(url)
-        exp = url.sub(/\A~/, home)
-        exp = exp.start_with?("/") ? exp : File.expand_path(exp, cfgdir)
-        puts ["local", name, exp, spec["sha256"]].join("\t")
-      else
-        puts ["external", name, url, spec["sha256"]].join("\t")
-      end
-    end'
+# ---------------------------------------------------- build.yml reader (Python)
+# All build.yml parsing goes through scripts/build-config.py, run from a venv with
+# pinned PyYAML created on first use under the build cache.
+ensure_python() {
+  [ -x "$PY_VENV/bin/python" ] && return
+  command -v python3 >/dev/null || die "python3 required to create the build-helper venv"
+  log "Creating Python venv for build helpers -> $PY_VENV"
+  python3 -m venv "$PY_VENV" || die "python3 -m venv failed"
+  "$PY_VENV/bin/pip" install --quiet --disable-pip-version-check -r "$SCRIPT_DIR/scripts/requirements.txt" \
+    || die "pip install (build-helper deps) failed"
 }
 
-inject_user_path() {  # true unless build.yml sets inject_path: false
-  CFG="$CFG" ruby -ryaml -e '
-    c = YAML.safe_load(File.read(ENV["CFG"]), permitted_classes: [Symbol]) || {}
-    exit(c.key?("inject_path") && c["inject_path"] == false ? 1 : 0)'
+# build_config <subcommand> -> scripts/build-config.py against $CFG. Subcommands:
+#   patches      TSV  kind<TAB>name<TAB>path_or_url<TAB>sha256 (url / ./ ../ ~ = local file, else downloaded)
+#   icon         the icon name, or empty
+#   inject-path  exits 1 iff build.yml sets inject_path: false, else 0
+# ensure_python's chatter goes to stderr so it never pollutes captured stdout.
+build_config() {
+  ensure_python >&2
+  "$PY_VENV/bin/python" "$SCRIPT_DIR/scripts/build-config.py" "$1" "$CFG"
 }
 
 verify_sha256() { # file expected
@@ -142,7 +136,7 @@ stage_prepare() {
         patch -p1 -d "$SRC" --no-backup-if-mismatch -i "$tmp" >/dev/null || die "patch failed: $name"
         rm -f "$tmp" ;;
     esac
-  done < <(resolve_patches)
+  done < <(build_config patches)
 }
 
 stage_configure() {
@@ -325,7 +319,7 @@ apply_icon() { # resources_dir info_plist
   local res="$1" plist="$2"
   # build.yml's `icon:` names a loose .icon under $ICONS_DIR (e.g. dragon-plus ->
   # $ICONS_DIR/dragon-plus.icon). No icon configured -> skip; named but missing -> fail.
-  local key; key="$(CFG="$CFG" ruby -ryaml -e 'c=YAML.safe_load(File.read(ENV["CFG"]))||{}; i=c["icon"]; print(i.is_a?(String) ? i : "")')"
+  local key; key="$(build_config icon)"
   [ -n "$key" ] || { sub "no icon configured"; return; }
   [ -d "$ICONS_DIR/$key.icon" ] || die "icon '$key' not found: $ICONS_DIR/$key.icon"
   compile_icon "$ICONS_DIR/$key.icon" "$res" "$plist"
@@ -359,7 +353,7 @@ inject_lsenvironment() { # info_plist app
   local plist="$1" app="$2"
   log "Injecting native-comp LSEnvironment into Emacs.app"
   $PB -c "Add :LSEnvironment dict" "$plist" 2>/dev/null || true
-  if inject_user_path; then
+  if build_config inject-path; then
     local user_path="$PATH:$HB/bin:$HB/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
     sub "inject_path: true -> EMACS_PLUS_PATH"
     $PB -c "Add :LSEnvironment:EMACS_PLUS_PATH string $user_path" "$plist" 2>/dev/null || \

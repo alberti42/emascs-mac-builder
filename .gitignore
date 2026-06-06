@@ -16,3 +16,7 @@
 # Generated icon catalog -- assets/ holds loose source only; build.sh compiles
 # the .car at build time (into the deployed .app, not the repo).
 assets/**/Assets.car
+
+# Python venv (default lives in the build cache, but guard against an in-repo one)
+/venv/
+.venv/

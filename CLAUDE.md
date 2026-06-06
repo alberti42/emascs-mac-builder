@@ -11,7 +11,8 @@ independent of, but deliberately interchangeable with,
 reads the **same `build.yml` schema** and reuses the emacs-plus Homebrew tap as a
 registry for baseline patches, community patches, and icons.
 
-There are no tests, no lint config, and no build system — the repo *is* the script.
+There is no lint config and no build system — `build.sh` is the core, with one
+Python helper (`scripts/build-config.py`) for reading `build.yml`.
 
 ## Running it
 
@@ -44,21 +45,26 @@ including the named one (see the `case` dispatch at the bottom of the script).
 
 ### Build host prerequisites
 
-Homebrew `gcc-N` + `libgccjit` (native-comp), `ruby` (YAML parsing of `build.yml`),
-and **full Xcode** (not just the Command Line Tools) when `build.yml` sets an
-`icon:` — `compile_icon` runs `actool`. There is **no emacs-plus tap dependency**:
-patches are fetched per `build.yml`, and the icon is a local `.icon`. The script
-`die()`s early if `build.yml` is missing, and `compile_icon` `die()`s if `actool`
-is absent.
+Homebrew `gcc-N` + `libgccjit` (native-comp), `python3` (`build.yml` is read by
+`scripts/build-config.py`), and **full Xcode** (not just the Command Line Tools)
+when `build.yml` sets an `icon:` — `compile_icon` runs `actool`. There is **no
+emacs-plus tap dependency**: patches are fetched per `build.yml`, and the icon is
+a local `.icon`. PyYAML is provisioned automatically — `ensure_python` creates a
+venv (pinned via `scripts/requirements.txt`) at `$EMACS_PY_VENV` (default
+`$EMACS_BUILD_DIR/venv`) on first use. The script `die()`s early if `build.yml` is
+missing, and `compile_icon` `die()`s if `actool` is absent.
 
 ## Architecture
 
 The script is organized as **resolvers → stages → dispatch**:
 
-- **Resolvers** (`resolve_patches`, `inject_user_path`) are inline Ruby snippets
-  that parse `build.yml`. `resolve_patches` emits TSV, classifying each patch entry
+- **Config reader** — all `build.yml` parsing goes through `scripts/build-config.py`
+  (run via the `build_config` shell wrapper, which lazily provisions the venv). It
+  has three subcommands: `patches` emits TSV, classifying each entry
   (`{name: {url, sha256}}`) as `local` (a `/ ./ ../ ~` path, sha256-verified) or
-  `external` (any other URL, downloaded + sha256-verified).
+  `external` (any other URL, downloaded + sha256-verified); `icon` prints the icon
+  name; `inject-path` exits 1 iff `inject_path: false`. `build_config` routes
+  `ensure_python`'s setup chatter to stderr so captured stdout stays clean.
 - **Stages** (`stage_prepare`, `stage_configure`, `stage_build`, `stage_package`)
   are the pipeline. `stage_package` calls a series of helpers
   (`apply_icon`, `write_site_lisp`, `inject_lsenvironment`, `relocate_native_lisp`,
