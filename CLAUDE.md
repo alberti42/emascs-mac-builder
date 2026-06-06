@@ -44,22 +44,21 @@ including the named one (see the `case` dispatch at the bottom of the script).
 
 ### Build host prerequisites
 
-Homebrew `gcc-N` + `libgccjit` (native-comp), `ruby` (YAML/JSON parsing of
-`build.yml`), the `d12frosted/homebrew-emacs-plus` tap checked out locally
-(used for baseline patches and the community patch/icon registry), and **full
-Xcode** (not just the Command Line Tools) when the configured icon is a locally
-bundled `.icon` — `compile_icon` runs `actool`. The script `die()`s early if
-`build.yml` or the tap is missing, and `compile_icon` `die()`s if `actool` is absent.
+Homebrew `gcc-N` + `libgccjit` (native-comp), `ruby` (YAML parsing of `build.yml`),
+and **full Xcode** (not just the Command Line Tools) when `build.yml` sets an
+`icon:` — `compile_icon` runs `actool`. There is **no emacs-plus tap dependency**:
+patches are fetched per `build.yml`, and the icon is a local `.icon`. The script
+`die()`s early if `build.yml` is missing, and `compile_icon` `die()`s if `actool`
+is absent.
 
 ## Architecture
 
 The script is organized as **resolvers → stages → dispatch**:
 
-- **Resolvers** (`resolve_patches`, `resolve_icon`, `inject_user_path`) are inline
-  Ruby snippets that parse `build.yml` and emit TSV. They intentionally mirror
-  emacs-plus's `EmacsBase#resolve_patches`, classifying each patch as
-  `community` (looked up in the tap's `community/registry.json`), `local`
-  (path on disk, sha256-verified), or `external` (URL, downloaded + sha256-verified).
+- **Resolvers** (`resolve_patches`, `inject_user_path`) are inline Ruby snippets
+  that parse `build.yml`. `resolve_patches` emits TSV, classifying each patch entry
+  (`{name: {url, sha256}}`) as `local` (a `/ ./ ../ ~` path, sha256-verified) or
+  `external` (any other URL, downloaded + sha256-verified).
 - **Stages** (`stage_prepare`, `stage_configure`, `stage_build`, `stage_package`)
   are the pipeline. `stage_package` calls a series of helpers
   (`apply_icon`, `write_site_lisp`, `inject_lsenvironment`, `relocate_native_lisp`,
@@ -78,9 +77,9 @@ It does not build any client/launcher app — that lives in a separate project.
 `assets/icons/dragon-plus.icon`, resolved via `SCRIPT_DIR`/`EMACS_ICONS_DIR`),
 `apply_icon` calls `compile_icon`, which runs `actool` to produce `Assets.car`
 (macOS 26 "Tahoe" app icon) + an `.icns` for older macOS and sets `CFBundleIconName`
-to the `.icon` basename. If no local `.icon` matches, `apply_icon` falls back to the
-existing tap/external resolution (`resolve_icon`). The dragon-plus icon is
-redistributed from emacs-plus; see `assets/README.md` for attribution.
+to the `.icon` basename. No `icon:` → skip; an `icon:` with no matching local
+`.icon` → `die` (no fallback — a wrong icon would be obvious anyway). The
+dragon-plus icon is redistributed from emacs-plus; see `assets/README.md` for attribution.
 
 ### Things that look wrong but are load-bearing
 
@@ -114,8 +113,10 @@ interactions. The long comments above each are the source of truth — **do not
 
 ### emacs-plus compatibility surface
 
-- `build.yml` keys consumed: `patches` (strings = community, or `{name: {url, sha256}}`),
-  `icon` (string = community, or `{url, sha256}`), `inject_path` (bool).
+- `build.yml` keys consumed: `patches` (each `{name: {url, sha256}}`), `icon` (a
+  name resolved to `assets/icons/<name>.icon`), `inject_path` (bool). This is a
+  subset of the emacs-plus schema — the tap-backed forms (community-name patches,
+  tap/external icons) are intentionally not supported.
 - `write_site_lisp` emits a `site-start.el` that `(provide 'emacs-plus)` and honors
   `EMACS_PLUS_PATH`, so emacs-plus-aware configs treat this build as an emacs-plus build.
 - `inject_lsenvironment` writes native-comp env (`CC`, `LIBRARY_PATH`) and optionally

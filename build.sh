@@ -7,14 +7,13 @@
 # It reproduces what `brew install emacs-plus@32` would do, but:
 #   * builds from a local git ref (this fork-emacs `master`) via an isolated,
 #     detached worktree -- your working checkout is never touched;
-#   * applies a fixed baseline (fix-ns-x-colors + system-appearance) plus every
-#     patch listed in build.yml (local / external / community), sha256-verified;
+#   * applies every patch listed in build.yml (local file or downloaded URL),
+#     each sha256-verified;
 #   * wires native-compilation (libgccjit) for both build and runtime;
 #   * builds a SELF-CONTAINED Emacs.app (binaries, lisp, native-lisp all inside
 #     the bundle -- no Unix prefix split);
-#   * applies the app icon from a loose .icon under ./assets/icons when build.yml
-#     names a locally-bundled icon (compiled to Assets.car via actool), else falls
-#     back to the emacs-plus tap;
+#   * applies the app icon from a loose .icon under ./assets/icons named by
+#     build.yml's `icon:` (compiled to Assets.car via actool);
 #   * deploys Emacs.app to ~/Applications and symlinks emacs/emacsclient
 #     (from inside Emacs.app) onto PATH.
 #
@@ -44,7 +43,6 @@ BUILD_DIR="${EMACS_BUILD_DIR:-$HOME/.cache/emacs-plus}"   # internal build cache
 APPS_DIR="${EMACS_APPS_DIR:-$HOME/Applications}"
 BIN_DIR="${EMACS_BIN_DIR:-$HOME/.local/bin}"            # PATH bin dir for the emacs/emacsclient entry points
 CFG="${EMACS_PLUS_BUILD_CONFIG:-$HOME/.config/emacs-plus/build.yml}"
-BASELINE_PATCHES=(round-undecorated-frame fix-ns-x-colors system-appearance)
 
 # This script's own directory, so it can find its bundled ./assets (loose icon
 # sources) regardless of where it's invoked from.
@@ -53,7 +51,6 @@ ICONS_DIR="${EMACS_ICONS_DIR:-$SCRIPT_DIR/assets/icons}"   # loose <name>.icon s
 
 SRC="$BUILD_DIR/emacs"
 HB="$(brew --prefix)"
-TAP="$(brew --repository)/Library/Taps/d12frosted/homebrew-emacs-plus"
 JOBS="$(sysctl -n hw.ncpu)"
 PB=/usr/libexec/PlistBuddy
 
@@ -62,7 +59,6 @@ sub()  { printf '    %s\n' "$*"; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ -f "$CFG" ] || die "build.yml not found: $CFG"
-[ -d "$TAP" ] || die "emacs-plus tap not found (needed for baseline + registry): $TAP"
 command -v ruby >/dev/null || die "ruby required for YAML parsing"
 
 # gcc / libgccjit discovery (the fiddly native-comp bits)
@@ -80,47 +76,25 @@ LIBRARY_PATH_VALUE=""
 LIBRARY_PATH_VALUE="${LIBRARY_PATH_VALUE:+$LIBRARY_PATH_VALUE:}$HB/lib/gcc/current:$HB/lib"
 
 # ------------------------------------------------------- build.yml: patch resolver
-# Emits TSV: kind<TAB>name<TAB>path_or_url<TAB>sha256   (mirrors EmacsBase#resolve_patches)
+# Each patch is {name: {url, sha256}}; a url starting with / ./ ../ ~ is a local
+# file, anything else is downloaded. Emits TSV: kind<TAB>name<TAB>path_or_url<TAB>sha256
 resolve_patches() {
-  CFG="$CFG" TAP="$TAP" MAJOR="$MAJOR" ruby -ryaml -rjson -e '
+  CFG="$CFG" ruby -ryaml -e '
     cfg = YAML.safe_load(File.read(ENV["CFG"]), permitted_classes: [Symbol]) || {}
     home = Dir.home; cfgdir = File.dirname(ENV["CFG"])
     local = ->(u){ %w[/ ./ ../ ~].any? { |p| u.start_with?(p) } }
     (cfg["patches"] || []).each do |p|
-      if p.is_a?(String)
-        reg = (JSON.parse(File.read("#{ENV["TAP"]}/community/registry.json")) rescue {"patches"=>{}})
-        info = reg.dig("patches", p) or abort "Unknown community patch: #{p}"
-        puts ["community", p, "#{ENV["TAP"]}/community/#{info["directory"]}/emacs-#{ENV["MAJOR"]}.patch", ""].join("\t")
-      elsif p.is_a?(Hash)
-        name = p.keys.first; spec = p[name] || {}
-        abort "patch #{name}: url+sha256 required" unless spec["url"] && spec["sha256"]
-        url = spec["url"]
-        if local.call(url)
-          exp = url.sub(/\A~/, home)
-          exp = exp.start_with?("/") ? exp : File.expand_path(exp, cfgdir)
-          puts ["local", name, exp, spec["sha256"]].join("\t")
-        else
-          puts ["external", name, url, spec["sha256"]].join("\t")
-        end
+      abort "patch entry must be {name: {url, sha256}}: #{p.inspect}" unless p.is_a?(Hash)
+      name = p.keys.first; spec = p[name] || {}
+      abort "patch #{name}: url+sha256 required" unless spec["url"] && spec["sha256"]
+      url = spec["url"]
+      if local.call(url)
+        exp = url.sub(/\A~/, home)
+        exp = exp.start_with?("/") ? exp : File.expand_path(exp, cfgdir)
+        puts ["local", name, exp, spec["sha256"]].join("\t")
+      else
+        puts ["external", name, url, spec["sha256"]].join("\t")
       end
-    end'
-}
-
-# Emits TSV: kind<TAB>path_or_url<TAB>sha256<TAB>tahoe_path<TAB>tahoe_name  (or nothing)
-resolve_icon() {
-  CFG="$CFG" TAP="$TAP" ruby -ryaml -rjson -e '
-    cfg = YAML.safe_load(File.read(ENV["CFG"]), permitted_classes: [Symbol]) || {}
-    icon = cfg["icon"]; exit unless icon
-    if icon.is_a?(String)
-      reg = (JSON.parse(File.read("#{ENV["TAP"]}/community/registry.json")) rescue {"icons"=>{}})
-      info = reg.dig("icons", icon) or abort "Unknown icon: #{icon}"
-      dir = "#{ENV["TAP"]}/community/#{info["directory"]}"
-      icns = "#{dir}/icon.icns"; abort "missing #{icns}" unless File.exist?(icns)
-      car = File.exist?("#{dir}/Assets.car") ? "#{dir}/Assets.car" : ""
-      name = (JSON.parse(File.read("#{dir}/metadata.json"))["tahoe_icon_name"] rescue nil) || "Emacs"
-      puts ["community", icns, "", car, name].join("\t")
-    elsif icon.is_a?(Hash) && icon["url"] && icon["sha256"]
-      puts ["external", icon["url"], icon["sha256"], "", "Emacs"].join("\t")
     end'
 }
 
@@ -151,23 +125,12 @@ stage_prepare() {
     git -C "$REPO" worktree add --detach --quiet "$SRC" "$rev"
   fi
 
-  log "Applying baseline patches: ${BASELINE_PATCHES[*]}"
-  local p
-  for p in "${BASELINE_PATCHES[@]}"; do
-    local f="$TAP/patches/emacs-$MAJOR/$p.patch"
-    [ -f "$f" ] || die "baseline patch missing: $f"
-    sub "$p"
-    patch -p1 -d "$SRC" --no-backup-if-mismatch -i "$f" >/dev/null || die "baseline patch failed: $p"
-  done
-
   log "Applying build.yml patches"
   local kind name loc sha tmp
   while IFS=$'\t' read -r kind name loc sha; do
     [ -n "$kind" ] || continue
     sub "$name ($kind)"
     case "$kind" in
-      community)
-        patch -p1 -d "$SRC" --no-backup-if-mismatch -i "$loc" >/dev/null || die "patch failed: $name" ;;
       local)
         [ -f "$loc" ] || die "local patch not found: $loc"
         verify_sha256 "$loc" "$sha"
@@ -359,34 +322,13 @@ compile_icon() { # icon_dir res plist
 }
 
 apply_icon() { # resources_dir info_plist
-  local res="$1" plist="$2" line kind loc sha car name target="$1/Emacs.icns"
-  # Prefer a locally-bundled loose .icon matching build.yml's `icon:` (fully
-  # contained, compiled via actool); otherwise fall back to the emacs-plus tap.
+  local res="$1" plist="$2"
+  # build.yml's `icon:` names a loose .icon under $ICONS_DIR (e.g. dragon-plus ->
+  # $ICONS_DIR/dragon-plus.icon). No icon configured -> skip; named but missing -> fail.
   local key; key="$(CFG="$CFG" ruby -ryaml -e 'c=YAML.safe_load(File.read(ENV["CFG"]))||{}; i=c["icon"]; print(i.is_a?(String) ? i : "")')"
-  if [ -n "$key" ] && [ -d "$ICONS_DIR/$key.icon" ]; then
-    compile_icon "$ICONS_DIR/$key.icon" "$res" "$plist"
-    return
-  fi
-  line="$(resolve_icon || true)"
-  [ -n "$line" ] || { sub "no icon configured"; return; }
-  # Split the TSV one field per line (tab->newline) instead of `IFS=$'\t' read`:
-  # tab is an IFS-whitespace char, so read would COLLAPSE the empty sha field
-  # that community icons emit, shifting car/name left and skipping the Assets.car
-  # copy below. One read per field preserves empty fields.
-  { read -r kind; read -r loc; read -r sha; read -r car; read -r name; } \
-    < <(printf '%s\n' "$line" | tr '\t' '\n')
-  log "Applying icon ($kind)"
-  if [ "$kind" = external ]; then
-    local tmp; tmp="$(mktemp -t icon).icns"
-    curl -fsSL -o "$tmp" "$loc" || die "icon download failed"
-    verify_sha256 "$tmp" "$sha"; loc="$tmp"
-  fi
-  cp -f "$loc" "$target"
-  if [ -n "${car:-}" ] && [ -f "$car" ]; then
-    cp -f "$car" "$res/Assets.car"
-    $PB -c "Delete :CFBundleIconName" "$plist" 2>/dev/null || true
-    $PB -c "Add :CFBundleIconName string ${name:-Emacs}" "$plist"
-  fi
+  [ -n "$key" ] || { sub "no icon configured"; return; }
+  [ -d "$ICONS_DIR/$key.icon" ] || die "icon '$key' not found: $ICONS_DIR/$key.icon"
+  compile_icon "$ICONS_DIR/$key.icon" "$res" "$plist"
 }
 
 write_site_lisp() { # site-lisp dir
