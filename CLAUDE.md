@@ -109,11 +109,13 @@ interactions. The long comments above each are the source of truth — **do not
   is guarded by `test ! -d`, so a present dir skips even the preloaded-eln build and
   its re-dump. The binary/`.elc`/base `.pdmp` still build. `prune_stale_eln` strips
   any bundle `.eln` in this mode. Use a full build (default) for anything shipped.
-- **`DEBUG=1` fast/debug build** (`stage_configure`): implies `SKIP_AOT`, and compiles
-  C at `-O0 -g3` (no release optimization, full symbols) instead of the release `-O`
-  (which Emacs's configure appends because the base `CFLAGS` carries no `-O`/`-g`).
-  Switching `DEBUG` on/off changes `CFLAGS`, so `stage_configure` records the mode in
-  `.build-opt-mode` and forces a reconfigure (and full C rebuild) when it flips.
+- **`DEBUG=1` fast/debug build**: implies `SKIP_AOT`, and compiles C at `-O0 -g3` (no
+  release optimization, full symbols) instead of the release `-O` (which Emacs's
+  configure appends because the base `CFLAGS` carries no `-O`/`-g`). It builds in its
+  **own worktree** (`$EMACS_BUILD_DIR/emacs-debug`, vs release's `…/emacs`) — like an
+  IDE's separate Debug/Release dirs — so each mode keeps its own incremental objects
+  and switching never triggers a rebuild. `SRC` is derived from the mode. Both modes
+  share the venv and currently deploy to the same `Emacs.app` target.
 - **Epoch-pinning `.el`/`.el.gz`** (`stage_package`): `gmake install` can leave a
   `.el.gz` newer than its `.elc`; with `load-prefer-newer`, Emacs then tries to
   load compressed source and recurses on `jka-compr`. Sources are touched to

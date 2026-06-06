@@ -38,8 +38,9 @@
 # testing patches (seconds, vs ~20 min for full AOT). Tightest iteration:
 #   SKIP_AOT=1 build.sh make   &&   ~/.cache/emacs-plus/emacs/src/emacs -Q
 # DEBUG=1 goes further: implies SKIP_AOT *and* compiles C at -O0 -g3 (no release
-# optimization, full debug symbols) for the fastest, debuggable test build. Switching
-# DEBUG on/off triggers a one-time reconfigure + full C rebuild (CFLAGS change).
+# optimization, full debug symbols) for the fastest, debuggable test build. It uses
+# its OWN worktree ($EMACS_BUILD_DIR/emacs-debug) -- like an IDE's separate Debug/
+# Release dirs -- so switching modes never churns the other build's object files.
 set -euo pipefail
 
 # ---------------------------------------------------------------- configuration
@@ -57,7 +58,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ICONS_DIR="${EMACS_ICONS_DIR:-$SCRIPT_DIR/assets/icons}"   # loose <name>.icon sources compiled at build time
 PY_VENV="${EMACS_PY_VENV:-$BUILD_DIR/venv}"                # venv (pinned PyYAML) for the build.yml reader
 
+# Separate worktree per optimization mode (like an IDE's Debug/Release dirs), so
+# switching modes never churns the other's object files. Release keeps the original
+# path; DEBUG gets a sibling. (Both share the venv + the deployed app target.)
 SRC="$BUILD_DIR/emacs"
+[ "${DEBUG:-0}" = 1 ] && SRC="$BUILD_DIR/emacs-debug"
 HB="$(brew --prefix)"
 JOBS="$(sysctl -n hw.ncpu)"
 PB=/usr/libexec/PlistBuddy
@@ -181,17 +186,12 @@ stage_configure() {
     "CFLAGS=$cflags"
   )
 
+  # Each mode has its own worktree, so a dir is only ever one optimization mode --
+  # no flip detection needed; a fresh dir configures itself for its mode.
   ( cd "$SRC"
     [ -x ./configure ] || { log "autogen.sh"; ./autogen.sh; }
-    # Reconfigure when the optimization mode changed since last time, else the old
-    # Makefile's CFLAGS (and -O level) would silently persist. .build-opt-mode records it.
-    reconf="${RECONFIGURE:-0}"
-    if [ -f .build-opt-mode ] && [ "$(cat .build-opt-mode)" != "$opt_mode" ]; then
-      sub "opt mode changed ($(cat .build-opt-mode) -> $opt_mode) -- forcing reconfigure"; reconf=1
-    fi
-    if [ ! -f Makefile ] || [ "$reconf" = 1 ]; then
+    if [ ! -f Makefile ] || [ "${RECONFIGURE:-0}" = 1 ]; then
       ./configure "${args[@]}"
-      printf '%s\n' "$opt_mode" > .build-opt-mode
     else
       sub "Makefile present -- skipping configure (RECONFIGURE=1 to force)"
     fi )
