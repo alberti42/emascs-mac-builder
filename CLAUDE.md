@@ -116,11 +116,12 @@ interactions. The long comments above each are the source of truth — **do not
   IDE's separate Debug/Release dirs — so each mode keeps its own incremental objects
   and switching never triggers a rebuild. `SRC` is derived from the mode. Both modes
   share the venv and currently deploy to the same `Emacs.app` target.
-- **Epoch-pinning `.el`/`.el.gz`** (`stage_package`): `gmake install` can leave a
-  `.el.gz` newer than its `.elc`; with `load-prefer-newer`, Emacs then tries to
-  load compressed source and recurses on `jka-compr`. Sources are touched to
-  1970 so `.elc` always wins. The deploy `cp -Rp` preserves these mtimes — plain
-  `cp -R` would re-break it.
+- **`.elc` mtime bump** (`stage_package`): `gmake install` can leave a `.el.gz`
+  newer than its `.elc`; with `load-prefer-newer`, Emacs then tries to load
+  compressed source and recurses on `jka-compr`. Fixed by `sleep 1` (into a strictly
+  later whole second — a same-second touch is racy) then `touch`ing every `.elc` so
+  it wins, with natural timestamps. The deploy `cp -Rp` preserves the ordering —
+  plain `cp -R` would flatten it.
 - **`emacs` on PATH is a wrapper, not a symlink**: a self-contained `--with-ns`
   build locates its bundle from the launch path, which isn't canonicalized; a
   symlink outside the bundle breaks bundle detection ("loadup.el not found"). The

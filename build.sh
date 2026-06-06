@@ -260,14 +260,15 @@ stage_package() {
   # compressed *source*; loading jka-compr.el.gz (the decompressor itself)
   # recurses ("Recursive load: .../jka-compr.el.gz").
   #
-  # Pin the .el/.el.gz SOURCES into the past so every .elc is unambiguously newer.
-  # (Bumping .elc to "now" instead is racy: install writes .elc and .el.gz within
-  # the same wall-clock second, and at APFS sub-second resolution the touch
-  # intermittently still leaves a .el.gz ahead of its .elc.) .eln native selection
-  # is keyed on the source hash, not mtime, so native-comp is unaffected.
-  log "Pinning .el/.el.gz sources to epoch so .elc always wins (load-prefer-newer)"
-  find "$app_src/Contents/Resources" \( -name '*.el.gz' -o -name '*.el' \) \
-    -exec touch -t 197001020000 {} +
+  # Make every .elc the newest of the trio. Bumping .elc to "now" in the SAME second
+  # install wrote .el.gz is racy (touch truncates to whole seconds, so a sub-second-
+  # later .el.gz can still win), so sleep into a strictly later second first -- then
+  # the .elc are unambiguously newest, with natural timestamps (no epoch-pinned dates).
+  # .eln native selection is keyed on the source hash, not mtime, so it's unaffected.
+  # (cp -Rp at deploy preserves this ordering; plain cp -R would flatten it.)
+  log "Bumping .elc mtimes so they win over .el.gz (load-prefer-newer)"
+  sleep 1
+  find "$app_src/Contents/Resources" -name '*.elc' -exec touch {} +
   [ -x "$app_src/Contents/MacOS/Emacs" ] || die "Emacs binary missing in $app_src"
   local res="$app_src/Contents/Resources"
 
@@ -305,8 +306,8 @@ stage_package() {
   mkdir -p "$APPS_DIR"
   rm -rf "$APPS_DIR/Emacs.app"        # bounded to the named app, never a shared dir
   # -p (preserve mtimes) is REQUIRED: plain 'cp -R' resets every file's mtime to
-  # copy time, which clobbers the epoch-pin on .el/.el.gz above and re-introduces
-  # the load-prefer-newer jka-compr recursion in the *deployed* app.
+  # copy time, which flattens the .elc-newer-than-.el.gz ordering set above and
+  # re-introduces the load-prefer-newer jka-compr recursion in the *deployed* app.
   cp -Rp "$app_src" "$APPS_DIR/Emacs.app"
   local app="$APPS_DIR/Emacs.app"
 
