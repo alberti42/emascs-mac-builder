@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------- configuration
-REPO="${EMACS_SRC_REPO:-/Users/andrea/Documents/Programming/Others/fork-emacs}"
+REPO="${EMACS_SRC_REPO:-$HOME/Documents/Programming/Others/fork-emacs}"
 REF="${EMACS_SRC_REF:-master}"
 MAJOR="${EMACS_MAJOR:-32}"
 BUILD_DIR="${EMACS_BUILD_DIR:-$HOME/.cache/emacs-plus}"   # internal build cache (worktree + objects)
