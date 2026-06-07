@@ -14,8 +14,9 @@
 #     the bundle -- no Unix prefix split);
 #   * applies the app icon from a loose .icon under ./assets/icons named by
 #     build.yml's `icon:` (compiled to Assets.car via actool);
-#   * deploys Emacs.app to ~/Applications and symlinks emacs/emacsclient
-#     (from inside Emacs.app) onto PATH.
+#   * deploys Emacs.app to ~/Applications and writes emacs/emacsclient wrappers
+#     (exec'ing into Emacs.app) onto PATH, and installs the xterm-emacs terminfo
+#     so emacsclient -t/-nw frames get 24-bit color.
 #
 # Usage:
 #   build.sh                 # full pipeline
@@ -57,6 +58,7 @@ CFG="${EMACS_PLUS_BUILD_CONFIG:-$HOME/.config/emacs-plus/build.yml}"
 # sources) regardless of where it's invoked from.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ICONS_DIR="${EMACS_ICONS_DIR:-$SCRIPT_DIR/assets/icons}"   # loose <name>.icon sources compiled at build time
+TERMINFO_SRC="${EMACS_TERMINFO_SRC:-$SCRIPT_DIR/assets/terminfo/xterm-emacs.terminfo}"  # custom terminfo installed for emacsclient
 PY_VENV="${EMACS_PY_VENV:-$BUILD_DIR/venv}"                # venv (pinned PyYAML) for the build.yml reader
 
 # Separate worktree per optimization mode (like an IDE's Debug/Release dirs), so
@@ -356,14 +358,27 @@ stage_package() {
 exec "$app/Contents/MacOS/Emacs" "\$@"
 EOS
   chmod +x "$BIN_DIR/emacs"
-  # emacsclient only talks to the daemon -- no bundle paths needed, symlink is fine.
-  ln -sfn "$app/$client_rel"          "$BIN_DIR/emacsclient"
+  # emacsclient is ALSO a wrapper (not a symlink), to export TERM=xterm-emacs:
+  # emacsclient hands its TERM to the daemon as the new tty frame's terminal type
+  # (the daemon's own TERM is irrelevant), so a -t/-nw frame picks up the
+  # setf24/setb24 entry installed above and renders 24-bit RGB unconditionally.
+  # No bundle paths are needed (it only talks to the daemon), so exec'ing the
+  # in-bundle binary directly is fine.
+  rm -f "$BIN_DIR/emacsclient"
+  cat >"$BIN_DIR/emacsclient" <<EOS
+#!/bin/sh
+export TERM=xterm-emacs
+exec "$app/$client_rel" "\$@"
+EOS
+  chmod +x "$BIN_DIR/emacsclient"
   sub "wrote   $BIN_DIR/emacs       -> exec Contents/MacOS/Emacs"
-  sub "linked  $BIN_DIR/emacsclient -> $client_rel"
+  sub "wrote   $BIN_DIR/emacsclient -> exec $client_rel (TERM=xterm-emacs)"
+
+  install_terminfo
 
   log "Done."
   sub "Emacs.app    -> $app"
-  sub "executables  -> $BIN_DIR/emacs (wrapper), $BIN_DIR/emacsclient (symlink into the bundle)"
+  sub "executables  -> $BIN_DIR/emacs, $BIN_DIR/emacsclient (both wrappers into the bundle)"
   sub "To make this the daemon, point your LaunchAgent at $BIN_DIR/emacs --fg-daemon"
 }
 
@@ -467,6 +482,26 @@ relocate_native_lisp() { # app
   rm -rf "$app/Contents/Resources/native-lisp"
   mv "$fw" "$app/Contents/Resources/native-lisp"
   ln -s "../Resources/native-lisp" "$fw"
+}
+
+install_terminfo() { # installs the xterm-emacs terminfo entry for the emacsclient wrapper
+  # The emacsclient wrapper sets TERM=xterm-emacs so emacsclient -t/-nw frames get
+  # unconditional 24-bit RGB (setf24/setb24), bypassing Emacs bug #70941's buggy
+  # 16-color ANSI fast-path that distorts faces under palette-remapping terminal
+  # themes (Catppuccin, Gruvbox, Nord, ...). That TERM is only useful if the entry
+  # exists, so compile it into the per-user $HOME/.terminfo db (tic -x, no root).
+  [ -f "$TERMINFO_SRC" ] || die "terminfo source not found: $TERMINFO_SRC"
+  local tic; tic="$(command -v tic || true)"
+  if [ -z "$tic" ]; then
+    sub "warning: tic not found -- skipping xterm-emacs terminfo install (emacsclient 24-bit colors unavailable)"
+    return 0
+  fi
+  log "Installing xterm-emacs terminfo (24-bit color for emacsclient -t/-nw)"
+  if "$tic" -x -o "$HOME/.terminfo" "$TERMINFO_SRC" >/dev/null 2>&1; then
+    sub "compiled xterm-emacs -> $HOME/.terminfo"
+  else
+    sub "warning: tic failed on $TERMINFO_SRC -- emacsclient 24-bit colors unavailable"
+  fi
 }
 
 prune_stale_eln() { # app

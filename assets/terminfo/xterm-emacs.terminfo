@@ -1,0 +1,18 @@
+# xterm-emacs: xterm-256color extended with setf24/setb24.
+#
+# Emacs consults terminfo strictly and falls back to 16-color ANSI approximation
+# when setf24/setb24 are absent. This causes terminal color themes that remap
+# the 16 ANSI base colors (Catppuccin, Gruvbox, Nord, etc.) to distort Emacs
+# face colors, sometimes dramatically (Emacs bug #70941's buggy ANSI fast-path).
+#
+# setf24/setb24 instruct Emacs to emit exact 24-bit RGB for all colors,
+# bypassing the ANSI approximation entirely -- the colors are then precisely the
+# ones the theme designer intended, regardless of the terminal's ANSI palette.
+#
+# Install: tic -x xterm-emacs.terminfo   (compiles to ~/.terminfo/78/xterm-emacs)
+# Use:     TERM=xterm-emacs emacsclient -nw
+#
+xterm-emacs|xterm-256color extended with Emacs 24-bit direct-color,
+    use=xterm-256color,
+    setf24=\E[38;2;%p1%{65536}%/%d;%p1%{256}%/%{255}%&%d;%p1%{255}%&%dm,
+    setb24=\E[48;2;%p1%{65536}%/%d;%p1%{256}%/%{255}%&%d;%p1%{255}%&%dm,

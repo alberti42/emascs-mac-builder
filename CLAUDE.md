@@ -39,7 +39,8 @@ including the named one (see the `case` dispatch at the bottom of the script).
 - `EMACS_APPS_DIR` / `EMACS_BIN_DIR` — deploy target (`~/Applications`) and the
   PATH bin dir where the `emacs`/`emacsclient` entry points go (`~/.local/bin`).
   Note `emacs` is installed as a wrapper script (not a symlink) so the
-  self-contained bundle is located from its launch path; `emacsclient` is a symlink.
+  self-contained bundle is located from its launch path; `emacsclient` is **also**
+  a wrapper, so it can `export TERM=xterm-emacs` (see the terminfo note below).
 - `SKIP_PREPARE=1` — reuse the worktree untouched (no reset, no re-patch).
 - `RECONFIGURE=1` — force `autogen.sh` + `./configure` to re-run.
 
@@ -134,8 +135,19 @@ interactions. The long comments above each are the source of truth — **do not
 - **`emacs` on PATH is a wrapper, not a symlink**: a self-contained `--with-ns`
   build locates its bundle from the launch path, which isn't canonicalized; a
   symlink outside the bundle breaks bundle detection ("loadup.el not found"). The
-  wrapper `exec`s the absolute in-bundle binary. `emacsclient` *is* a symlink
-  (it only talks to the daemon).
+  wrapper `exec`s the absolute in-bundle binary. `emacsclient` is **also** a
+  wrapper (it only talks to the daemon, so it doesn't need bundle paths) — but a
+  wrapper rather than a symlink so it can `export TERM=xterm-emacs` before exec.
+- **`xterm-emacs` terminfo + `emacsclient` `TERM`** (`install_terminfo`): the
+  `emacsclient` wrapper exports `TERM=xterm-emacs`; emacsclient passes that TERM to
+  the daemon as the new tty frame's terminal type (the daemon's own `TERM` is
+  irrelevant), so `-t`/`-nw` frames get the `setf24`/`setb24` capabilities and emit
+  unconditional 24-bit RGB, bypassing Emacs bug #70941's buggy 16-color ANSI
+  fast-path (which distorts faces under palette-remapping themes like Catppuccin /
+  Gruvbox / Nord). The entry is a loose source at
+  `assets/terminfo/xterm-emacs.terminfo` (inherits `xterm-256color` via `use=`,
+  adds only `setf24`/`setb24`); deploy compiles it into the per-user
+  `$HOME/.terminfo` with `tic -x` (no root). Missing `tic` warns and skips.
 - **`relocate_native_lisp`**: moves `native-lisp` out of `Contents/Frameworks`
   (where codesign treats each child as a nested bundle and fails) into
   `Contents/Resources`, leaving a relative symlink so `native-comp-eln-load-path`
