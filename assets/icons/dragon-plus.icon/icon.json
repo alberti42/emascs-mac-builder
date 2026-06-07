@@ -40,7 +40,7 @@
       "layers" : [
         {
           "glass" : false,
-          "image-name" : "dragon-white 2.png",
+          "image-name" : "dragon-white.png",
           "name" : "dragon"
         }
       ],
