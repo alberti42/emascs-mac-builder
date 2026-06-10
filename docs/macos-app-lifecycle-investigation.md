@@ -17,23 +17,27 @@ matter, line numbers may drift.
 The NS port has **no implementation of the conventional macOS app lifecycle**
 for the case of a *running process with no visible frame*. Concretely:
 
-1. **There is no `applicationShouldHandleReopen:hasVisibleWindows:`** — the
-   standard Cocoa hook every well-behaved Mac app uses to recreate a window when
-   its Dock tile is clicked while it has none. Emacs simply does not implement it.
-2. When the last frame on a display closes, `ns_delete_terminal` tries to
-   **downgrade the live process from `Regular` to `Prohibited`** activation
-   policy at runtime. macOS does **not reliably honor a downgrade out of
-   `Regular`** once an app has shown windows. The result is a **ghost Dock tile**:
-   the process is still shown as running, the code believes it is `Prohibited`,
-   and — with no reopen handler — clicking the tile does nothing.
+**There is no `applicationShouldHandleReopen:hasVisibleWindows:`** — the standard
+Cocoa hook every well-behaved Mac app uses to recreate a window when its Dock tile
+is clicked while it has none. Emacs simply does not implement it.
 
-So a server/daemon Emacs, after you close its last GUI frame, becomes
-**"running but unreachable from the Dock."** That is the bug. The root design
-error is twofold: (a) relying on an activation-policy transition the OS does not
-perform, and (b) never implementing the reopen contract that would make the Dock
-tile meaningful in the first place. A secondary smell: **one activation policy is
-applied regardless of how the process was launched**, conflating "headless server
-that occasionally shows a GUI frame" with "GUI app that is momentarily frameless."
+So a server/daemon Emacs, after you close its last GUI frame, stays a perfectly
+normal `Regular`/foreground app **with a live Dock tile and no window** — and
+clicking that tile does **nothing**, because the reopen hook was never
+implemented. The tile isn't a "ghost"; it is correctly present. It is just
+**dead**: there is no in-app route from a Dock click to a new frame.
+
+This was verified empirically (see §3): when the last GUI frame of a daemon
+closes, the activation policy stays `Foreground` and the NS display/terminal
+**persists** — so the `Prohibited`-park code in `ns_delete_terminal` (§2.3b)
+**does not run on frame close at all.** An earlier draft of this document blamed a
+failed `Regular → Prohibited` activation-policy downgrade; that hypothesis was
+tested and **refuted**. The single defect is the missing reopen contract.
+
+A secondary smell, separate from the bug: `ns_delete_terminal` applies one
+activation policy (`Prohibited`) on terminal teardown regardless of launch
+identity, and its comment ("called when the last frame on a display is deleted")
+is misleading — closing the last frame does **not** delete the display.
 
 ---
 
@@ -113,13 +117,18 @@ delete, calls `Fkill_emacs (70)` (~2833) on a *forced* last-frame delete, and
 errors "Attempt to delete daemon's initial frame" (~2621) — the daemon's initial
 frame is what keeps a daemon alive past this point.)
 
-**(b) Last frame on a display removed:** `ns_delete_terminal` (`nsterm.m` ~5915):
+**(b) Terminal/display teardown:** `ns_delete_terminal` (`nsterm.m` ~5915):
 ```objc
 /* Rather than try to clean up the NS environment we can just
    disable the app and leave it waiting for any new frames.  */
 [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
 ```
-This is the **downgrade** that the OS does not reliably honor (see §3).
+Its comment says it is "called when the last frame on a display is deleted," but
+**that is not what happens in practice** (verified in §3): closing the last GUI
+frame does *not* delete the NS display/terminal — the display connection persists
+with zero frames — so this function (and its `Prohibited` set) **does not run on
+frame close.** It runs only on real terminal teardown (display-connection close,
+or process exit). On the frame-close path this code is effectively dormant.
 
 ### 2.4 Termination
 
@@ -161,32 +170,40 @@ The user-observable failure: start `emacs --daemon`; create a GUI frame with
 (§2.1). Close that frame. **The tile remains** (running-indicator dot) but
 **clicking it produces no frame, ever.**
 
-Two compounding causes:
+### 3.1 What actually causes it (empirically verified)
 
-1. **The runtime downgrade is not honored.** `ns_delete_terminal` sets
-   `Prohibited` (§2.3b), but macOS does not reliably transform a *running*
-   process *out of* `Regular` once it has displayed windows
-   (`setActivationPolicy:` / `TransformProcessType` is dependable upward, flaky
-   downward). The Dock therefore keeps showing the tile, while the app's internal
-   state believes it is `Prohibited`. The two disagree → **ghost tile.**
+This was tested on an isolated, uniquely-named daemon (`--daemon=ghosttile`, its
+own socket, separate from any real daemon). Sequence: start headless → create one
+GUI frame via `emacsclient -c` → delete that frame → measure.
 
-2. **Even if the downgrade *did* take, it would be wrong.** `Prohibited` means
-   "may not create windows or be activated" (§1). A truly-`Prohibited` app cannot
-   respond to a Dock click at all; recovery is possible only via the external
-   `emacsclient` path that re-runs the §2.1 upgrade. And because there is **no
-   reopen handler** (§2.5), there is no in-app route to a new frame regardless of
-   policy.
+| Measurement (after the GUI frame is deleted) | Result |
+|---|---|
+| `ns` terminal still in `(terminal-list)`? | **Yes** — `"…fritz.box"` persists |
+| ns frames remaining (`(mapcar #'framep (frame-list))`) | **none** — `(t)`, only the initial daemon frame |
+| activation policy via `lsappinfo info -app <pid>` | **`type="Foreground"`** |
 
-So the design is internally inconsistent: it parks the app in a state intended to
-mean "invisible, waiting for new frames," but (a) the OS leaves it visible, and
-(b) the app never implemented the mechanism by which a click could ask for a new
-frame. **Running but unreachable.**
+So: zero GUI frames, yet the **NS display/terminal is still alive** and the
+process is still **`Foreground`/`Regular`**. Therefore `ns_delete_terminal`
+**never ran** — closing frames does not tear down the display — and consequently
+**nothing ever attempted a `Regular → Prohibited` downgrade.**
 
-A secondary design smell: **a single activation policy is applied regardless of
-launch identity.** Parking a `--daemon`-launched *server* is at least arguable (it
-is conceptually headless and also serves `emacsclient -t` tty frames). Applying
-the same parking to a *GUI-launched `Emacs.app`* — a process that presented itself
-as a windowed Mac app — is simply un-Mac-like.
+### 3.2 Conclusion
+
+The defect is **one thing**: the app correctly remains a normal `Regular`
+foreground app with a live Dock tile and no window, but there is **no
+`applicationShouldHandleReopen:hasVisibleWindows:`** (§2.5), so a click on the
+tile has no path to a new frame. The tile is not a "ghost" produced by a botched
+policy change — it is a *legitimately present* tile that is simply **dead**.
+
+A hypothesis in an earlier draft — that the failure was a runtime
+`Regular → Prohibited` downgrade the OS fails to honor — was tested and
+**refuted** by the measurements above (`ns_delete_terminal` is not even reached on
+frame close). It is retained here only as a recorded dead end.
+
+A secondary design smell, *separate from this bug*: `ns_delete_terminal` applies
+`Prohibited` on genuine terminal teardown regardless of launch identity, and its
+comment misdescribes when it runs. Worth tidying, but not the cause of the dead
+tile.
 
 ---
 
@@ -195,7 +212,7 @@ as a windowed Mac app — is simply un-Mac-like.
 | # | Path | Behavior today | Verdict |
 |---|---|---|---|
 | A | **Non-server GUI `Emacs.app`** (no daemon) | One process, one tile. Closing the last frame runs `handle-delete-frame` → `save-buffers-kill-emacs` → **process quits.** | **Works; feels correct** for users who do not need a server. *Caveat:* closing the last frame quits Emacs, and (§2.4) this path is **not** guarded by `ns-confirm-quit`, so an accidental close = accidental exit. |
-| B | **`emacs --daemon` + `emacsclient -c`, then close the frame** | Daemon survives; tile appears on first frame, then becomes the **ghost tile** of §3. | **Broken UX.** This is the bug. |
+| B | **`emacs --daemon` + `emacsclient -c`, then close the frame** | Daemon survives; tile appears on first frame and **stays live** (`Foreground`), but with no window and no reopen handler, clicking it does nothing (§3). | **Broken UX.** This is the bug — a live but **dead** tile. |
 | C | **Standalone `Emacs.app` *and* a separate `emacs --daemon`** | Two processes → **two Dock tiles.** | **By design / unavoidable.** Two processes legitimately mean two tiles; not a bug. (Tile B among them is still broken per row B.) |
 | D | **`Cmd-Q` / "Quit Emacs" / `C-x C-c`** | `terminate:` → `save-buffers-kill-emacs`, guarded by `ns-confirm-quit`. | **Works; correct.** `Cmd-Q` is the expected "really quit" gesture on macOS and is rarely hit by accident. |
 
@@ -203,23 +220,26 @@ as a windowed Mac app — is simply un-Mac-like.
 
 ## 5. What a correct design looks like
 
-Two changes restore native behavior; both are small and idiomatic:
+**The fix for the bug (path B) is a single, idiomatic change:**
 
 1. **Implement `applicationShouldHandleReopen:hasVisibleWindows:`** → when
    `hasVisibleWindows == NO`, trigger the existing `newFrame:` / `make-frame`
-   path (§2.2). This is the conventional Cocoa contract the port is missing.
+   path (§2.2). This is the conventional Cocoa contract the port is missing, and
+   — because the daemon already stays `Regular` with a live tile (§3) — **it
+   requires no activation-policy change at all.** Add the handler and the dead
+   tile becomes a working one.
 
-2. **Stop relying on the `Regular → Prohibited` downgrade.** Either keep the app
-   `Regular` when frameless (live, clickable tile + menu bar — the Mail/Notes
-   model), or, for users who want it hidden when idle, use **`Accessory`** (no
-   tile, no menu bar, *but still activatable* via Launch Services, so it can be
-   reopened) — never `Prohibited`, which is both un-revivable and the state the OS
-   fails to enter cleanly.
+The remaining items are *optional enhancements*, not part of the bug fix:
 
-   This naturally becomes a **`defcustom`** (`Regular` vs `Accessory`), since the
-   right answer depends on launch identity/preference. A sensible default: a
-   GUI-launched `Emacs.app` → `Regular`; a `--daemon` server → whatever the user
-   prefers. The point is: **drop `Prohibited`.**
+2. **(Optional) "hide when idle."** Some users may want the tile to *disappear*
+   when the app is frameless rather than linger. That means *actively* setting
+   **`Accessory`** on frame-close (new behavior — recall §3 shows nothing
+   currently downgrades the policy). `Accessory` is the right target because it is
+   still activatable via Launch Services, so reopen still works — unlike
+   `Prohibited`, which "may not be activated." This is a **`defcustom`**
+   (`Regular` keep-tile vs `Accessory` hide-when-idle); `Prohibited` should not be
+   offered. (Note: setting `Accessory` here is a *fresh* policy transition on
+   frame-close, distinct from the dormant `ns_delete_terminal` path.)
 
 3. **(Optional, addresses path A's caveat)** A `defcustom` to make closing the
    last frame *not* quit — i.e. drop to the frameless-resident state instead of
@@ -229,12 +249,14 @@ Two changes restore native behavior; both are small and idiomatic:
    "really quit" remains available and unambiguous; only the *accidental* exit on
    last-frame-close is removed.
 
-The relationship to existing workarounds: **`osx-pseudo-daemon`** sidesteps all of
-this from Lisp by spawning a hidden frame the instant the last visible one closes,
-so the frame count never reaches zero, `ns_delete_terminal` never fires, the app
-stays `Regular`, and reactivation reveals the hidden frame. That it exists at all
-is evidence the lifecycle is missing upstream; the fixes above remove the need for
-the hidden-frame hack.
+The relationship to existing workarounds: **`osx-pseudo-daemon`** works around the
+missing reopen contract from Lisp — it spawns a hidden frame the instant the last
+visible one closes and reveals it on reactivation, so there is always a frame to
+bring back even though no `applicationShouldHandleReopen:` exists. (The app stays
+`Regular` either way, per §3; the package's value is supplying the
+reveal-on-activation behavior the port lacks.) That such a package is needed at
+all is evidence the lifecycle is missing upstream; fix #1 removes the need for the
+hidden-frame hack.
 
 ---
 
