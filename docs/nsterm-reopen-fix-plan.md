@@ -7,15 +7,20 @@
 
 Two commits, deliberately split for upstream review:
 
-- **Patch A — `ad81685` "ns: make a frameless daemon reopenable from the Dock"**
+- **Patch A — `f8d8ce7` "ns: make a frameless daemon reopenable from the Dock"**
   (`src/nsterm.m`, `lisp/term/ns-win.el`). The headline fix: never park in
   `Prohibited`, implement `applicationShouldHandleReopen:`, handle the
-  `ns-new-frame` event while frameless. NS-local, conventional Cocoa.
-- **Patch B — `4bea4bd` "Don't let closing a clientless frame kill a daemon"**
+  `ns-new-frame` event while frameless, and dispatch `[ns-new-frame]` as a
+  **special event** so the *first* Dock click creates the frame (§3.3.1). NS-local,
+  conventional Cocoa.
+- **Patch B — `54ed7bf` "Don't let closing a clientless frame kill a daemon"**
   (`lisp/files.el`, `lisp/server.el`). Closing a *non-client* frame in a daemon
   (e.g. a Dock/reopen frame) used to fall through to `save-buffers-kill-emacs` and
   kill the daemon. Generalizes the protection Emacs already gives *client* frames.
   Touches generic core → expect more review; stands alone.
+
+Also delivered as a single `build.yml` local patch (`ns-daemon-reopen.patch`,
+regenerated from `d0653..fix-macos-lifecycle`) for this repo's master-based builds.
 
 This doc records the **as-built** design (which diverged from the original plan in
 a few deliberate ways — see "Design notes / deviations" below) plus the build/test
@@ -151,6 +156,28 @@ A throwaway prototype of exactly this (plus `fprintf` tracing) already exists in
 the **DEBUG worktree** `~/.cache/emacs-plus/emacs-debug/src/nsterm.m` from the
 investigation — read it for reference, but implement cleanly in the canonical
 source (§4) and delete the tracing.
+
+#### 3.3.1 REQUIRED companion: dispatch `[ns-new-frame]` as a *special event*
+
+**Empirically validated (instrumented build, single-click trace).** The handler
+above is necessary but **not sufficient**: with `[ns-new-frame]` bound in
+`global-map` (the stock binding), the **first** Dock click on a frameless daemon
+produced *no frame* — a second click was needed. The instrumentation showed the
+reopen *does* fire on click 1 (`flag=0`), `newFrame:` *does* run and queue the
+`ns-new-frame` event (`emacs_event` non-null, no early return) — but the event
+just **sits in the keyboard buffer**. An idle, frameless daemon's command loop
+won't dispatch a `global-map` key event until the *next* input arrives: it has no
+focused-frame / current-keyboard context to run `read-key-sequence` against (the
+event is tagged to the NS keyboard; the daemon's loop is reading the initial
+terminal). Click 2 supplies that context and flushes it.
+
+**Fix:** bind `[ns-new-frame]` in **`special-event-map`** instead of `global-map`
+(`lisp/term/ns-win.el`). Special events are run by `read-char` the instant the
+buffer is read — regardless of focus/current-keyboard — so `ns_send_appdefined`
+waking the loop is enough, and the **first** click creates the frame. This is
+folded into Patch A. (`make-frame` from a special-event context proved fine for
+the idle-daemon case in testing; watch for reentrancy only if it's ever triggered
+mid-redisplay, which the reopen path is not.)
 
 ### 3.4 Restore `Regular` when a frame is (re)created — REQUIRED, locate this
 
