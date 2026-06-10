@@ -126,6 +126,33 @@ visible frame and no menu bar, this step is missing.
   - Deploys to `~/Applications/Emacs.app`; `emacs`/`emacsclient` wrappers in
     `~/.local/bin`.
 
+### Development iteration loop (do NOT recompile release each time)
+
+Iterate **only in the DEBUG worktree** — release stays untouched:
+
+1. Edit `~/.cache/emacs-plus/emacs-debug/src/nsterm.m` (and `lisp/term/ns-win.el`)
+   directly — this is your fast scratch copy.
+2. `DEBUG=1 ./build.sh make` (incremental: recompiles just the changed file +
+   relink + redump, seconds) then `DEBUG=1 ./build.sh repackage` to deploy.
+3. Repeat. **Use only `make`/`repackage`** (they imply `SKIP_PREPARE`, so the
+   worktree is not reset and your edits + incremental objects survive). Never run
+   `prepare` / bare `./build.sh` mid-iteration — it resets the worktree to the ref
+   and re-applies `build.yml` patches, wiping your edits.
+
+Notes:
+- DEBUG and release have **separate object dirs**, so iterating in DEBUG never
+  churns the release build. The release worktree (`…/emacs`) is only needed for a
+  final shippable build.
+- Both modes deploy to the **same** `~/Applications/Emacs.app`, so while iterating
+  the deployed app is the DEBUG build (fine for testing); restore release at the
+  end (`./build.sh repackage`, no DEBUG).
+- **Capturing a clean patch:** the debug worktree already carries `build.yml`
+  patches as uncommitted changes, so a plain `git diff` mixes them with your work.
+  Snapshot the patched baseline first — e.g. `git -C <debug-worktree> stash` is not
+  safe (resets); instead `git -C <debug-worktree> commit -am wip-baseline` *before*
+  editing, then `git diff` after gives only your change. Transcribe that into
+  `fork-emacs` / a `build.yml` patch as the deliverable.
+
 ### Delivery options (pick with the user)
 
 1. **fork-emacs branch** consumed by setting `EMACS_SRC_REF` (simplest for the
