@@ -1,25 +1,39 @@
-# Implementation handoff: fix the NS daemon "can't reopen from the Dock" defect
+# Fix the NS daemon "can't reopen from the Dock" defect
 
-**For:** a fresh agent implementing the `nsterm.m` patch.
 **Read first:** [`macos-app-lifecycle-investigation.md`](./macos-app-lifecycle-investigation.md)
-— the validated diagnosis this plan implements. Don't re-investigate the root
-cause; it's settled and evidence-backed.
+— the validated diagnosis this implements.
 
-This document is self-contained: goal, settled decisions, exact changes, where the
-code lives, the build/test loop, acceptance criteria, known risks, and cleanup.
+## Status: IMPLEMENTED (`fork-emacs`, branch `fix-macos-lifecycle`)
+
+Two commits, deliberately split for upstream review:
+
+- **Patch A — `ad81685` "ns: make a frameless daemon reopenable from the Dock"**
+  (`src/nsterm.m`, `lisp/term/ns-win.el`). The headline fix: never park in
+  `Prohibited`, implement `applicationShouldHandleReopen:`, handle the
+  `ns-new-frame` event while frameless. NS-local, conventional Cocoa.
+- **Patch B — `4bea4bd` "Don't let closing a clientless frame kill a daemon"**
+  (`lisp/files.el`, `lisp/server.el`). Closing a *non-client* frame in a daemon
+  (e.g. a Dock/reopen frame) used to fall through to `save-buffers-kill-emacs` and
+  kill the daemon. Generalizes the protection Emacs already gives *client* frames.
+  Touches generic core → expect more review; stands alone.
+
+This doc records the **as-built** design (which diverged from the original plan in
+a few deliberate ways — see "Design notes / deviations" below) plus the build/test
+loop, acceptance criteria, open questions for upstream, and cleanup.
 
 ---
 
 ## 1. Goal (one paragraph)
 
 When an Emacs **daemon** loses its last GUI frame it parks in
-`NSApplicationActivationPolicyProhibited` (verified: `ns_delete_terminal`,
-`nsterm.m` ~5917). `Prohibited` "may not create windows or be activated," and the
-NS port implements **no `applicationShouldHandleReopen:hasVisibleWindows:`**, so
-the native macOS gesture — click the pinned Dock icon / open `Emacs.app` from
-Finder — produces an **inert app with no frame**; the user must rescue it with
-`emacsclient -c` from a terminal. Fix: stop parking in `Prohibited`, and implement
-the reopen contract so a click yields a frame.
+`NSApplicationActivationPolicyProhibited`. `Prohibited` "may not create windows or
+be activated," and the NS port implements **no
+`applicationShouldHandleReopen:hasVisibleWindows:`**, so the native macOS gesture —
+click the pinned Dock icon / open `Emacs.app` from Finder — produces an **inert app
+with no frame**; the user must rescue it with `emacsclient -c` from a terminal.
+Patch A stops parking in `Prohibited` and implements the reopen contract so a click
+yields a frame; Patch B ensures that frame, once closed again, drops cleanly back
+to a frameless daemon instead of killing it.
 
 ---
 
@@ -42,19 +56,54 @@ These were decided with the user; treat as fixed requirements:
 5. **Opt-in via the user's `init.el`** (not `early-init.el` — the decision points
    fire at runtime, after init loads). **Orthogonal to the server**: do not touch
    `server-start`; the in-process reopen path needs no server.
-6. **Stay-alive-on-last-frame `defcustom` for the *non-daemon* case** (the proper
-   replacement for osx-pseudo-daemon's keep-alive). When set, closing the last
-   frame leaves Emacs **running frameless** — exactly how a daemon already lives —
-   instead of `save-buffers-kill-emacs`. **No invisible/hidden frame** (that is the
-   osx-pseudo-daemon hack we are explicitly avoiding): the process simply does not
-   quit, and the §3.2/§3.3 machinery (non-`Prohibited` policy + reopen handler)
-   brings a frame back on click. Combined with §3.2/§3.3 this makes a plain
-   `Emacs.app` behave like the daemon — and **fully retires osx-pseudo-daemon**
-   (its reopen half is superseded by §3.3, its keep-alive half by this). Default
-   **off** (a plain Emacs still quits on last-frame-close unless the user opts in).
-7. **Scope:** this defect + the keep-alive `defcustom` above. Out of scope
-   (explicitly deferred): URL-scheme handling (`application:openURLs:` /
-   `org-protocol://`), and any separate launcher app.
+6. **Non-daemon "stay alive frameless" — DESCOPED (infeasible).** The original
+   plan floated a `defcustom` to keep a *non-daemon* Emacs alive (frameless, no
+   hidden frame) when its last frame closes, to retire osx-pseudo-daemon for
+   non-daemon users too. **This cannot be done without a hidden frame.**
+   `src/frame.c`'s `delete_frame` errors `"Attempt to delete the only frame"` when
+   no *other* frame exists — even with `force` (only the internal `Qnoelisp` force
+   bypasses it, and that path calls `Fkill_emacs`). A non-daemon Emacs has no
+   always-present initial terminal frame (that is exactly what `--daemon` provides),
+   so it **fundamentally cannot run frameless**. osx-pseudo-daemon keeps a hidden
+   frame for precisely this reason. The honest answer for non-daemon users is "run
+   a daemon" (Patches A+B serve that fully) or "keep osx-pseudo-daemon." For a
+   **daemon**, A+B already retire osx-pseudo-daemon (reopen half → A; keep-alive is
+   intrinsic to the daemon, with B making frame-close non-fatal).
+7. **Scope:** this defect only (Patches A+B). Out of scope (explicitly deferred):
+   the non-daemon stay-alive feature (#6, infeasible), URL-scheme handling
+   (`application:openURLs:` / `org-protocol://`), and any separate launcher app.
+
+---
+
+## Design notes / deviations (as-built, Patch B)
+
+These choices were settled with the user and differ from the first-draft plan:
+
+1. **Window-system-agnostic.** Patch B gates on `(daemonp)`, **not** on
+   `(eq (framep …) 'ns)`. The rule — *a daemon is killed only by explicit
+   `kill-emacs` / `server-stop-automatically`, never by a frame-close gesture* — is
+   true for any daemon (X/pgtk/w32 too); only the *Dock trigger* is NS-specific.
+   Framing it as "generalize the protection client frames already get to all of a
+   daemon's frames" is the upstream-defensible story.
+2. **One shared helper, no duplicated logic.** `server-save-buffers-kill-terminal-noclient`
+   (in `server.el`) holds the whole "last frame? honor `server-stop-automatically`?
+   else `delete-frame`" decision. Both the `'nowait` emacsclient branch *and* the
+   non-client daemon case (`files.el`) call it, so a Dock/reopen frame and a
+   `nowait` emacsclient frame behave **identically in every config**. Key enabling
+   fact: `emacs --daemon` always starts the server, so `(daemonp) ⟹ server running`
+   — deferring this to server.el is legitimate reuse, not improper coupling.
+3. **Reopen frames stay non-client.** The C reopen handler creates a plain
+   `make-frame` frame (`client = nil`), *not* a dummy `'nowait` client. The C side
+   stays uniform (it can't know about daemons/clients); all kill-vs-delete policy
+   lives in Lisp. Tagging reopen frames `'nowait` was rejected: it would be a lie
+   (no emacsclient involved) and would couple the reopen path to server.el even in
+   the non-daemon case.
+4. **Save-on-close is retained (data safety).** Closing the last frame still offers
+   to save modified buffers (`save-some-buffers`), exactly as a fileless
+   `emacsclient -c` does. A daemon silently accumulating unsaved buffers that vanish
+   on reboot is both un-macOS-like and dangerous; closing the last frame is the
+   right moment to flush. Deleting a frame loses no buffer data, but the *prompt* is
+   a deliberate safety reminder.
 
 ---
 
@@ -117,30 +166,32 @@ visible frame and no menu bar, this step is missing.
 
 ---
 
-### 3.5 Stay-alive-on-last-frame `defcustom` (non-daemon) — replaces osx-pseudo-daemon
+### 3.5 Patch B — daemon survives closing a clientless frame (`files.el`, `server.el`)
 
-The daemon already survives last-frame-close, so this is purely for the **non-daemon**
-`Emacs.app`. The quit happens in `handle-delete-frame` (`lisp/frame.el:263`): when
-the frame being closed is the last one and Emacs is not a daemon, it calls
-`save-buffers-kill-emacs`. Gate that:
+This is the **as-built** companion to Patch A; it replaces the original plan's
+NS-gated clause and the (infeasible) non-daemon stay-alive idea.
 
-- Add a `defcustom`, suggested name **`ns-stay-alive-on-last-frame`** (Lisp-only;
-  default `nil`), in `lisp/term/ns-win.el`.
-- In `handle-delete-frame`, when this is the last frame **and** the var is non-nil
-  **and** we're on the `ns` window-system, **just `delete-frame`** instead of
-  `save-buffers-kill-emacs`. Emacs then runs frameless (like a daemon); §3.2 keeps
-  the policy non-`Prohibited` (so the tile/`open` stays clickable) and §3.3 recreates
-  a frame on reopen.
-- **No hidden frame is created** — this is the whole point of doing it properly.
-- **Explicit quit still exits:** leave `⌘Q` / "Quit Emacs" (`terminate:` →
-  `save-buffers-kill-emacs`) and `C-x C-c` (`save-buffers-kill-terminal`) as
-  quitting paths. Only the *close-the-frame* gesture is made non-fatal. This keeps
-  the boundary clear: closing a window ≠ quitting the app (the macOS-native mental
-  model); quitting is still one explicit gesture away.
+`save-buffers-kill-terminal` (`C-x C-c`) dispatches on `(frame-parameter nil
+'client)`. A non-client frame fell to `(save-buffers-kill-emacs)` and killed the
+daemon. Change:
 
-This piece is **separable** from §3.2/§3.3: the daemon fix (the user's own setup)
-needs only §3.1–§3.4. Ship §3.5 if/when you want plain non-daemon Emacs to get the
-same behavior and drop osx-pseudo-daemon.
+- `lisp/server.el`: new shared helper **`server-save-buffers-kill-terminal-noclient`**
+  — `(save-some-buffers arg) (delete-frame)` unless this is the last frame standing
+  (honoring `server-stop-automatically`, discounting the daemon's initial frame),
+  in which case `save-buffers-kill-emacs`. The `'nowait` branch of
+  `server-save-buffers-kill-terminal` now calls it.
+- `lisp/files.el`: `save-buffers-kill-terminal` gains a middle `cond` clause — in a
+  daemon, route a **clientless** frame through that helper instead of killing Emacs.
+
+See "Design notes / deviations" above for *why* it's WS-agnostic, why one shared
+helper, why reopen frames stay non-client, and why save-on-close is retained.
+
+> **Note on the window-close (red-button) gesture vs `C-x C-c`.** Patch B covers the
+> `C-x C-c` / `save-buffers-kill-terminal` path. The red-button close goes through
+> `handle-delete-frame` (`lisp/frame.el:263`) — but in a **daemon** that already
+> finds the always-present initial frame as an "other" frame and just deletes,
+> so the daemon survives a red-button close with no change needed. (A *non-daemon*
+> would quit there; making it stay alive is the descoped, infeasible §2.6.)
 
 ---
 
@@ -230,15 +281,18 @@ own socket) so you never disturb the user's real daemon.
    policy back to `Regular`). *Verify the open question below.*
 3. **No `Prohibited`** appears in any post-close state (`lsappinfo` never shows the
    un-reactivatable state).
-4. **Non-daemon, default (`ns-stay-alive-on-last-frame` nil):** a plain `Emacs.app`
-   still quits on closing its last frame (`handle-delete-frame` →
-   `save-buffers-kill-emacs`).
-5. **Non-daemon, opted in (`ns-stay-alive-on-last-frame` t):** closing the last
-   frame leaves Emacs **running frameless** (no hidden frame; `lsappinfo` shows it
-   still alive), and **clicking the tile / `open -a` brings a frame back** — i.e.
-   it now behaves like criterion 1 without `--daemon`. `⌘Q` and `C-x C-c` still
-   quit.
-6. **`⌘Q` / "Quit Emacs" still quits**, and `ns-confirm-quit` behavior is
+4. **Daemon survives `C-x C-c` on a clientless frame (Patch B).** In a Dock/reopen
+   frame, `C-x C-c` offers to save, deletes the frame, and the **daemon keeps
+   running** (it does not exit). Without server-stop-automatically this holds for
+   any number of frames; the same applies to a `nowait` (`emacsclient -n -c`) frame
+   — verify the two are indistinguishable.
+5. **`server-stop-automatically` still honored.** With it set to
+   `kill-terminal`/`delete-frame`, closing the last real frame *does* shut the
+   daemon down — identically whether that frame is a Dock/reopen (non-client) frame
+   or a `nowait` frame.
+6. **Non-daemon unchanged:** a plain `Emacs.app` still quits on `C-x C-c` /
+   last-frame close (the non-daemon stay-alive feature is descoped — §2.6).
+7. **`⌘Q` / "Quit Emacs" still quits**, and `ns-confirm-quit` behavior is
    unchanged.
 
 ---
