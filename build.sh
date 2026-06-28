@@ -67,7 +67,8 @@ PY_VENV="${EMACS_PY_VENV:-$BUILD_DIR/venv}"                # venv (pinned PyYAML
 SRC="$BUILD_DIR/emacs"
 [ "${DEBUG:-0}" = 1 ] && SRC="$BUILD_DIR/emacs-debug"
 HB="$(brew --prefix)"
-JOBS="$(sysctl -n hw.ncpu)"
+# Leave one core free so the machine stays responsive during the long build.
+JOBS="$(( $(sysctl -n hw.ncpu) - 2 ))"
 PB=/usr/libexec/PlistBuddy
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
