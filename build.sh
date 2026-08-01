@@ -190,6 +190,7 @@ stage_configure() {
     --with-native-compilation=aot
     --with-xml2 --with-gnutls --with-modules --with-rsvg --with-webp
     --without-dbus --without-imagemagick
+    --with-xwidgets
     --with-ns
     "CFLAGS=$cflags"
   )
