@@ -125,6 +125,18 @@ verify_sha256() { # file expected
   actual:   $actual"
 }
 
+apply_patch() { # file name
+  # -N refuses a patch that is already applied instead of asking whether to
+  # reverse it.  Without it `patch' prompts, the prompt is invisible because
+  # this output is captured, and the default answer REVERSES the patch --
+  # silently undoing a fix that has landed upstream.  Note --batch is not a
+  # substitute: Apple's patch takes it as "answer yes", reverses, and exits 0.
+  local out
+  out="$(patch -p1 -d "$SRC" -N --no-backup-if-mismatch -i "$1" 2>&1)" \
+    || die "patch failed: $2
+$out"
+}
+
 # ----------------------------------------------------------------------- stages
 stage_prepare() {
   log "Exporting $REF from $REPO into isolated worktree"
@@ -148,12 +160,12 @@ stage_prepare() {
       local)
         [ -f "$loc" ] || die "local patch not found: $loc"
         verify_sha256 "$loc" "$sha"
-        patch -p1 -d "$SRC" --no-backup-if-mismatch -i "$loc" >/dev/null || die "patch failed: $name" ;;
+        apply_patch "$loc" "$name" ;;
       external)
         tmp="$(mktemp -t emacs-patch).patch"
         curl -fsSL -o "$tmp" "$loc" || die "download failed: $name ($loc)"
         verify_sha256 "$tmp" "$sha"
-        patch -p1 -d "$SRC" --no-backup-if-mismatch -i "$tmp" >/dev/null || die "patch failed: $name"
+        apply_patch "$tmp" "$name"
         rm -f "$tmp" ;;
     esac
   done < <(build_config patches)
