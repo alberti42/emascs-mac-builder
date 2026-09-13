@@ -66,6 +66,19 @@ PY_VENV="${EMACS_PY_VENV:-$BUILD_DIR/venv}"                # venv (pinned PyYAML
 # path; DEBUG gets a sibling. (Both share the venv + the deployed app target.)
 SRC="$BUILD_DIR/emacs"
 [ "${DEBUG:-0}" = 1 ] && SRC="$BUILD_DIR/emacs-debug"
+# Scratch HOME for every Emacs the build runs (bootstrap, dump, AOT, install).
+# startup.el's normal-top-level UNCONDITIONALLY pushes the user's eln-cache/
+# (under user-emacs-directory, i.e. $XDG_CONFIG_HOME/emacs or ~/.emacs.d) onto
+# native-comp-eln-load-path -- even with EMACSNATIVELOADPATH set, and -batch /
+# --no-site-file don't stop it. So without this, the AOT step resolves (and
+# trampoline-compiles into) the SAME eln-cache/<abi-hash>/ your installed Emacs
+# and its packages use. When the ABI hash matches the running Emacs, the two
+# race: the build finds an eln there, the other side prunes/rewrites it, and
+# batch-native-compile dies with native-lisp-load-failed "file does not exists".
+# Pointing HOME + XDG_CONFIG_HOME at a throwaway dir gives the build an empty,
+# private eln-cache. Only gmake sees it -- the real HOME is used everywhere else
+# (~/Applications, ~/.local/bin, ~/.terminfo, git, brew).
+BUILD_HOME="$BUILD_DIR/home"
 HB="$(brew --prefix)"
 # Leave one core free so the machine stays responsive during the long build.
 JOBS="$(( $(sysctl -n hw.ncpu) - 2 ))"
@@ -171,6 +184,13 @@ stage_prepare() {
   done < <(build_config patches)
 }
 
+# Run gmake in DIR with the build's private HOME (see BUILD_HOME above).
+build_make() {
+  local dir="$1"; shift
+  mkdir -p "$BUILD_HOME/.config"
+  ( cd "$dir" && HOME="$BUILD_HOME" XDG_CONFIG_HOME="$BUILD_HOME/.config" gmake "$@" )
+}
+
 stage_configure() {
   local opt_mode=release
   [ "${DEBUG:-0}" = 1 ] && opt_mode=debug
@@ -254,7 +274,7 @@ stage_build() {
       rm -f "$SRC/src/emacs.pdmp"
     fi
     log "Building with gmake -j$JOBS"
-    ( cd "$SRC" && gmake -j"$JOBS" )
+    build_make "$SRC" -j"$JOBS"
     echo skip > "$SRC/.aot-mode"
     return
   fi
@@ -269,7 +289,7 @@ stage_build() {
   log "Clearing native-lisp (forces a full AOT recompile)"
   rm -rf "$SRC/native-lisp"
   log "Building with gmake -j$JOBS (this is the long one)"
-  ( cd "$SRC" && gmake -j"$JOBS" )
+  build_make "$SRC" -j"$JOBS"
 
   # gmake's own AOT trigger is unreliable: the '../native-lisp' recipe only runs
   # compile-eln-aot when the directory is absent (test ! -d), but building the
@@ -283,13 +303,13 @@ stage_build() {
   # up-to-date check anyway, so reuse would require a custom driver -- deliberately
   # not done, to keep each build's output deterministic.
   log "Native-compiling all lisp (AOT) -- gmake's built-in trigger is unreliable here"
-  ( cd "$SRC/lisp" && gmake -j"$JOBS" compile-eln-aot EMACS="$SRC/src/emacs" ELNDONE="" )
+  build_make "$SRC/lisp" -j"$JOBS" compile-eln-aot EMACS="$SRC/src/emacs" ELNDONE=""
   echo aot > "$SRC/.aot-mode"   # so a later SKIP_AOT build knows to clear this bulk
 }
 
 stage_package() {
   log "Installing self-contained Emacs.app (gmake install)"
-  ( cd "$SRC" && gmake install )
+  build_make "$SRC" install
 
   local app_src="$SRC/nextstep/Emacs.app"
   [ -d "$app_src" ] || die "expected self-contained app at $app_src after 'gmake install'"
@@ -538,7 +558,7 @@ prune_stale_eln() { # app
   # rather than the full set.
   local app="$1" nl="$1/Contents/Frameworks/native-lisp" verdir d n
   [ -d "$nl" ] || { sub "warning: no native-lisp in bundle -- native-comp AOT did not install"; return 0; }
-  verdir="$("$app/Contents/MacOS/Emacs" --batch --eval '(princ comp-native-version-dir)' 2>/dev/null)"
+  verdir="$(HOME="$BUILD_HOME" XDG_CONFIG_HOME="$BUILD_HOME/.config" "$app/Contents/MacOS/Emacs" --batch --eval '(princ comp-native-version-dir)' 2>/dev/null)"
   [ -n "$verdir" ] || { sub "warning: could not read comp-native-version-dir; leaving native-lisp as-is"; return 0; }
   log "Pruning native-lisp to the live version dir ($verdir)"
   for d in "$nl"/*/; do

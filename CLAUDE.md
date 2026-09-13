@@ -125,6 +125,17 @@ interactions. The long comments above each are the source of truth — **do not
   never triggers a rebuild. `SRC` is derived from the mode. Both modes share the venv
   and currently deploy to the same `Emacs.app` target. Changing what configure args a
   mode passes needs `RECONFIGURE=1` once on an already-configured worktree.
+- **Private `HOME` for every gmake step** (`build_make`, `BUILD_HOME`): Emacs's
+  `normal-top-level` unconditionally pushes the user's `eln-cache/` (under
+  `user-emacs-directory`, so `$XDG_CONFIG_HOME/emacs` or `~/.emacs.d`) onto
+  `native-comp-eln-load-path` — `EMACSNATIVELOADPATH`, `-batch`, `--no-site-file`
+  don't prevent it. So bootstrap/dump/AOT/install would otherwise read (and
+  trampoline-compile into) the same `eln-cache/<abi-hash>/` the installed, running
+  Emacs uses; when the ABI hash matches, the two race and `compile-eln-aot` dies with
+  `native-lisp-load-failed "file does not exists"`. All gmake calls (and the one direct
+  batch run in `prune_stale_eln`) therefore run with `HOME`/`XDG_CONFIG_HOME` pointed
+  at `$EMACS_BUILD_DIR/home`, a throwaway dir with an empty private eln-cache. The
+  real `HOME` is still used for deploy targets, `~/.terminfo`, git and brew.
 - **`.elc` mtime bump** (`stage_package`): `gmake install` can leave a `.el.gz`
   newer than its `.elc`; with `load-prefer-newer`, Emacs then tries to load
   compressed source and recurses on `jka-compr`. Fixed by `sleep 1` (into a strictly
