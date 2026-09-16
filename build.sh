@@ -17,9 +17,10 @@
 #   * deploys Emacs.app to ~/Applications and writes emacs/emacsclient wrappers
 #     (exec'ing into Emacs.app) onto PATH, and installs the xterm-emacs terminfo
 #     so emacsclient -t/-nw frames get 24-bit color;
-#   * leaves Emacs.app.dSYM next to the deployed app, so a crash in the RELEASE
-#     build symbolicates to file:line (release builds at -O2 -g3 -- debug info
-#     does not change codegen, so this is still the production build).
+#   * links the debug info into Contents/MacOS/Emacs.dSYM inside the bundle, so a
+#     crash in the RELEASE build symbolicates to file:line (release builds at
+#     -O2 -g3 -- debug info does not change codegen, so this is still the
+#     production build).
 #
 # Usage:
 #   build.sh                 # full pipeline
@@ -49,9 +50,9 @@
 # build's objects.
 #
 # Both modes carry -g3, so any build can be debugged; DEBUG only buys accurate
-# stepping and un-elided locals. SKIP_DSYM=1 skips the dsymutil pass at deploy -- it
-# is cheap (~0.5s, ~5MB) so there is rarely a reason to, and skipping costs you
-# file:line as soon as the worktree's .o files are rebuilt. Changing the flags of an
+# stepping and un-elided locals. SKIP_DSYM=1 skips the dsymutil pass at deploy;
+# skipping costs you file:line as soon as the worktree's .o files are rebuilt, and
+# saves only the dSYM's disk space inside the bundle. Changing the flags of an
 # already-configured worktree is handled automatically: stage_configure stamps them
 # and re-runs configure + drops the stale C objects when they change.
 set -euo pipefail
@@ -349,19 +350,22 @@ stage_build() {
   echo aot > "$SRC/.aot-mode"   # so a later SKIP_AOT build knows to clear this bulk
 }
 
-# Link the build's debug info into a standalone .dSYM beside the deployed app.
+# Link the build's debug info into a .dSYM next to the executable, inside the bundle.
 # REQUIRED for -g3 to be worth anything after the fact: macOS does not put DWARF in
 # the executable. The linker records a debug MAP -- absolute paths to the .o files
 # that hold the real DWARF (OSO stabs) -- so lldb resolves file:line only while the
 # worktree's objects are still there, untouched, from THAT exact build. The next
 # `prepare` overwrites them, and the app you are still running silently degrades to
-# function-names-only... which is precisely when last week's crash report needs a
-# line number. dsymutil copies the DWARF out of the .o files into a .dSYM bundle
-# matched to the binary by UUID, which lldb and Crash Reporter find automatically
-# when it sits next to the app. Kept BESIDE the bundle, not inside it: inside, it
-# would bloat every copy of the app and get swept into the signature for no reason.
-# Built to a temp path and swapped in, so a failed run never leaves a truncated
-# .dSYM that tools would trust. SKIP_DSYM=1 opts out.
+# function-names-only... which is precisely when a crash report needs a line number.
+# dsymutil copies the DWARF out of the .o files into a .dSYM bundle matched to the
+# binary by UUID. lldb finds it with no configuration when it is named after the
+# binary and sits either next to it (Contents/MacOS/Emacs.dSYM) or beside the .app;
+# Contents/Resources is NOT searched. Next to the executable keeps the bundle
+# self-contained: the symbols travel with any copy of the app. It must be created
+# BEFORE codesign so it is sealed with everything else (codesign --deep does not
+# treat a .dSYM as nested code, and --verify --strict passes). Built to a temp path
+# and swapped in, so a failed run never leaves a truncated .dSYM that tools would
+# trust. SKIP_DSYM=1 opts out.
 make_dsym() {
   local binary="$1" out="$2"
   if [ "${SKIP_DSYM:-0}" = 1 ]; then
@@ -434,6 +438,10 @@ stage_package() {
 
   relocate_native_lisp "$app_src"
 
+  # Before signing, so the .dSYM is part of the seal. The worktree objects the debug
+  # map points at are current right now; LC_UUID is untouched by signing and cp.
+  make_dsym "$app_src/Contents/MacOS/Emacs" "$app_src/Contents/MacOS/Emacs.dSYM"
+
   log "Signing (ad-hoc, required on recent macOS)"
   # Sign + strict-verify; surface failure instead of swallowing it silently.
   if codesign --force --deep --sign - "$app_src" >/dev/null 2>&1 \
@@ -451,10 +459,6 @@ stage_package() {
   # re-introduces the load-prefer-newer jka-compr recursion in the *deployed* app.
   cp -Rp "$app_src" "$APPS_DIR/Emacs.app"
   local app="$APPS_DIR/Emacs.app"
-
-  # Signing does not touch LC_UUID and cp preserves it, so the deployed binary still
-  # matches the worktree objects -- link its debug info now, while they are current.
-  make_dsym "$app/Contents/MacOS/Emacs" "$APPS_DIR/Emacs.app.dSYM"
 
   # Put the executables on PATH, replacing any prior wrappers/symlinks.
   mkdir -p "$BIN_DIR"

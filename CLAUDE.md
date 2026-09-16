@@ -42,7 +42,7 @@ including the named one (see the `case` dispatch at the bottom of the script).
   self-contained bundle is located from its launch path; `emacsclient` is **also**
   a wrapper, so it can `export TERM=xterm-emacs` (see the terminfo note below).
 - `SKIP_PREPARE=1` — reuse the worktree untouched (no reset, no re-patch).
-- `SKIP_DSYM=1` — skip the `dsymutil` pass at deploy (no `Emacs.app.dSYM`).
+- `SKIP_DSYM=1` — skip the `dsymutil` pass at deploy (no `Contents/MacOS/Emacs.dSYM`).
 - `RECONFIGURE=1` — force `autogen.sh` + `./configure` to re-run.
 
 ### Build host prerequisites
@@ -127,16 +127,22 @@ interactions. The long comments above each are the source of truth — **do not
   and leaves the DWARF in the worktree's object files. So `-g3` alone resolves
   file:line only while those exact objects survive; the next `prepare` overwrites them
   and the already-deployed app silently degrades to function names. `dsymutil` links
-  the DWARF into a standalone `Emacs.app.dSYM` (UUID-matched, found automatically by
-  lldb/Crash Reporter) placed **beside** the deployed app — inside the bundle it would
-  bloat every copy and get swept into the signature. Measured: ~0.5s, ~5MB.
+  the DWARF into `Contents/MacOS/Emacs.dSYM` (UUID-matched) **inside** the bundle, so
+  the symbols travel with any copy of the app. lldb searches, with no configuration,
+  for a dSYM named after the binary next to the executable or beside the `.app`;
+  `Contents/Resources` is not searched. The step runs **before** `codesign`, so the
+  dSYM is sealed with the rest: `--deep` does not treat it as nested code and
+  `--verify --strict` passes.
 - **CFLAGS-change detection** (`stage_configure`): the objects depend on `globals.h`
   (`$(ALLOBJS): globals.h`), never on the Makefile, and `--disable-dependency-tracking`
   is on — so re-running `configure` with new flags would leave every stale `.o` in
   place (a "`-g3`" binary whose objects hold no DWARF). The effective `cflags` are
   stamped in `$SRC/.cflags`; on a mismatch the script reconfigures and runs `clean` in
-  `src`/`lib`/`lib-src` only, so `.elc` and `native-lisp` survive — a C rebuild, not a
-  bootstrap. The stamp is written only after `configure` succeeds.
+  `src`/`lib`/`lib-src` only, so `.elc` survive. `native-lisp` does not: the CFLAGS
+  string is part of `system-configuration-options`, which feeds `comp-abi-hash`, so a
+  CFLAGS change renames the eln version directory and every `.eln` is recompiled (the
+  full pipeline clears `native-lisp` anyway). The stamp is written only after
+  `configure` succeeds.
 - **`DEBUG=1` fast/debug build**: implies `SKIP_AOT`; compiles C at `-O0 -g3` (nothing
   inlined or reordered, so stepping is accurate and locals aren't elided) instead of
   the release `-O2 -g3`; and passes
