@@ -42,6 +42,7 @@ including the named one (see the `case` dispatch at the bottom of the script).
   self-contained bundle is located from its launch path; `emacsclient` is **also**
   a wrapper, so it can `export TERM=xterm-emacs` (see the terminfo note below).
 - `SKIP_PREPARE=1` — reuse the worktree untouched (no reset, no re-patch).
+- `SKIP_DSYM=1` — skip the `dsymutil` pass at deploy (no `Emacs.app.dSYM`).
 - `RECONFIGURE=1` — force `autogen.sh` + `./configure` to re-run.
 
 ### Build host prerequisites
@@ -69,7 +70,7 @@ The script is organized as **resolvers → stages → dispatch**:
 - **Stages** (`stage_prepare`, `stage_configure`, `stage_build`, `stage_package`)
   are the pipeline. `stage_package` calls a series of helpers
   (`apply_icon`, `write_site_lisp`, `inject_lsenvironment`, `relocate_native_lisp`,
-  `prune_stale_eln`).
+  `prune_stale_eln`, `make_dsym`).
 - **Dispatch** maps the CLI target to the cumulative chain of stages; `run_prepare`
   wraps `stage_prepare` to honor `SKIP_PREPARE`.
 
@@ -115,16 +116,38 @@ interactions. The long comments above each are the source of truth — **do not
   SKIP_AOT build skips it so a no-op stays ~bare-`make` fast. `prune_stale_eln` must
   **keep the live verdir** (those preloaded elns), or the deployed app won't boot —
   stripping them was a bug. Full build (default) for anything shipped.
-- **`DEBUG=1` fast/debug build**: implies `SKIP_AOT`; compiles C at `-O0 -g3` (no
-  release optimization, full symbols) instead of the release `-O` (which Emacs's
-  configure appends because the base `CFLAGS` carries no `-O`/`-g`); and passes
+- **`-g3` on the release build too**: release compiles at `-O2 -g3`, not bare `-O2`.
+  Debug info does not change codegen, so the shipped bundle is still exactly the
+  production build — it just also symbolicates to file:line when it crashes, which is
+  the whole point (Emacs crashes are the thing being chased). `-g3` rather than `-g`
+  keeps macro definitions, so `XCAR`/`CHECK_TYPE`/etc. are expandable in lldb. The
+  cost is disk in the worktree's `.o`, not bundle size.
+- **`make_dsym` at deploy** (`stage_package`): on macOS the linker does **not** embed
+  DWARF in the executable — it writes a debug *map* of absolute `.o` paths (OSO stabs)
+  and leaves the DWARF in the worktree's object files. So `-g3` alone resolves
+  file:line only while those exact objects survive; the next `prepare` overwrites them
+  and the already-deployed app silently degrades to function names. `dsymutil` links
+  the DWARF into a standalone `Emacs.app.dSYM` (UUID-matched, found automatically by
+  lldb/Crash Reporter) placed **beside** the deployed app — inside the bundle it would
+  bloat every copy and get swept into the signature. Measured: ~0.5s, ~5MB.
+- **CFLAGS-change detection** (`stage_configure`): the objects depend on `globals.h`
+  (`$(ALLOBJS): globals.h`), never on the Makefile, and `--disable-dependency-tracking`
+  is on — so re-running `configure` with new flags would leave every stale `.o` in
+  place (a "`-g3`" binary whose objects hold no DWARF). The effective `cflags` are
+  stamped in `$SRC/.cflags`; on a mismatch the script reconfigures and runs `clean` in
+  `src`/`lib`/`lib-src` only, so `.elc` and `native-lisp` survive — a C rebuild, not a
+  bootstrap. The stamp is written only after `configure` succeeds.
+- **`DEBUG=1` fast/debug build**: implies `SKIP_AOT`; compiles C at `-O0 -g3` (nothing
+  inlined or reordered, so stepping is accurate and locals aren't elided) instead of
+  the release `-O2 -g3`; and passes
   `--without-compress-install` (uncompressed `.el`, no gzip pass — so the
   `.elc` mtime bump is skipped too, see below). It builds in its **own worktree**
   (`$EMACS_BUILD_DIR/emacs-debug`, vs release's `…/emacs`) — like an IDE's separate
   Debug/Release dirs — so each mode keeps its own incremental objects and switching
   never triggers a rebuild. `SRC` is derived from the mode. Both modes share the venv
-  and currently deploy to the same `Emacs.app` target. Changing what configure args a
-  mode passes needs `RECONFIGURE=1` once on an already-configured worktree.
+  and currently deploy to the same `Emacs.app` target. Changing a mode's `CFLAGS` is
+  picked up automatically (see CFLAGS-change detection above); changing any *other*
+  configure arg still needs `RECONFIGURE=1` once on an already-configured worktree.
 - **Private `HOME` for every gmake step** (`build_make`, `BUILD_HOME`): Emacs's
   `normal-top-level` unconditionally pushes the user's `eln-cache/` (under
   `user-emacs-directory`, so `$XDG_CONFIG_HOME/emacs` or `~/.emacs.d`) onto

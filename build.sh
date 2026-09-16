@@ -16,7 +16,10 @@
 #     build.yml's `icon:` (compiled to Assets.car via actool);
 #   * deploys Emacs.app to ~/Applications and writes emacs/emacsclient wrappers
 #     (exec'ing into Emacs.app) onto PATH, and installs the xterm-emacs terminfo
-#     so emacsclient -t/-nw frames get 24-bit color.
+#     so emacsclient -t/-nw frames get 24-bit color;
+#   * leaves Emacs.app.dSYM next to the deployed app, so a crash in the RELEASE
+#     build symbolicates to file:line (release builds at -O2 -g3 -- debug info
+#     does not change codegen, so this is still the production build).
 #
 # Usage:
 #   build.sh                 # full pipeline
@@ -39,10 +42,18 @@
 # (seconds, vs ~20 min for full AOT). The bulk lisp runs as byte-code; only the few
 # preloaded elns the dump requires are still built. Tightest iteration:
 #   SKIP_AOT=1 build.sh make   &&   ~/.cache/emacs-plus/emacs/src/emacs -Q
-# DEBUG=1 goes further: implies SKIP_AOT, compiles C at -O0 -g3 (no release
-# optimization, full debug symbols), and installs uncompressed .el (no gzip pass).
-# It uses its OWN worktree ($EMACS_BUILD_DIR/emacs-debug) -- like an IDE's separate
-# Debug/Release dirs -- so switching modes never churns the other build's objects.
+# DEBUG=1 goes further: implies SKIP_AOT, drops optimization (-O0 -g3 instead of the
+# release -O2 -g3, so nothing is inlined or reordered), and installs uncompressed .el
+# (no gzip pass). It uses its OWN worktree ($EMACS_BUILD_DIR/emacs-debug) -- like an
+# IDE's separate Debug/Release dirs -- so switching modes never churns the other
+# build's objects.
+#
+# Both modes carry -g3, so any build can be debugged; DEBUG only buys accurate
+# stepping and un-elided locals. SKIP_DSYM=1 skips the dsymutil pass at deploy -- it
+# is cheap (~0.5s, ~5MB) so there is rarely a reason to, and skipping costs you
+# file:line as soon as the worktree's .o files are rebuilt. Changing the flags of an
+# already-configured worktree is handled automatically: stage_configure stamps them
+# and re-runs configure + drops the stale C objects when they change.
 set -euo pipefail
 
 # ---------------------------------------------------------------- configuration
@@ -207,11 +218,20 @@ stage_configure() {
   local cflags="-DFD_SETSIZE=10000 -DDARWIN_UNLIMITED_SELECT -I$SQLITE/include -I$GCC_PREFIX/include -I$GCCJIT/include -I$HB/include"
   # Optimization: release uses -O2 to match emacs-plus (which gets it from Homebrew's
   # superenv; outside that env, Emacs's configure would otherwise only add -O = -O1).
-  # DEBUG skips optimization and keeps full symbols for a fast, debuggable test build.
+  # -g3 rides along with it ON RELEASE TOO, deliberately: debug info does not change
+  # code GENERATION -- same -O2 inlining, same instructions, same behavior -- it only
+  # annotates it. (The file is not byte-identical: it gains a debug map. The machine
+  # code is.) So the shipped build stays the production build, but when it crashes the
+  # report resolves to file:line instead of bare addresses. -g3 rather than -g keeps macro definitions, which is what makes
+  # a tree this macro-heavy (XCAR, CHECK_TYPE, ...) actually inspectable in lldb.
+  # It costs disk in the worktree's .o, NOT bundle size: on macOS the linker leaves the
+  # DWARF in the object files and writes only a debug MAP into the executable -- which
+  # is why the deploy has to run dsymutil (see make_dsym).
+  # DEBUG additionally drops optimization for a fast, fully-faithful debuggable build.
   if [ "$opt_mode" = debug ]; then
     cflags="$cflags -O0 -g3"
   else
-    cflags="$cflags -O2"
+    cflags="$cflags -O2 -g3"
   fi
   # Self-contained Emacs.app: everything (binaries, lisp, native-lisp, info) lands
   # INSIDE the bundle. No --prefix / Unix split / locallisppath -- that layout only
@@ -231,15 +251,37 @@ stage_configure() {
   # release default keeps compression for a smaller bundle.)
   [ "$opt_mode" = debug ] && args+=(--without-compress-install)
 
-  # Each mode has its own worktree, so a dir is only ever one optimization mode --
-  # no flip detection needed; a fresh dir configures itself for its mode.
+  # Each mode has its own worktree, so a dir is only ever one optimization mode -- no
+  # flip detection needed; a fresh dir configures itself for its mode. The flags WITHIN
+  # a mode can still change though (e.g. -O2 -> -O2 -g3), and that change does not
+  # propagate on its own: with --disable-dependency-tracking the objects depend on
+  # globals.h ('$(ALLOBJS): globals.h' in src/Makefile) and never on the Makefile, so
+  # re-running configure alone leaves every stale .o in place -- you would get a "-g3"
+  # binary whose objects hold no DWARF, and a debug map pointing at them. So stamp the
+  # flags and, when they differ, reconfigure AND drop the objects. The clean is scoped
+  # to src/lib/lib-src: .elc and native-lisp survive, so this is a C rebuild, not a
+  # bootstrap.
+  local stamp="$SRC/.cflags" reconfigure="${RECONFIGURE:-0}" objclean=0
+  if [ -f "$SRC/Makefile" ] && [ "$(cat "$stamp" 2>/dev/null)" != "$cflags" ]; then
+    log "CFLAGS changed since the last configure -- reconfiguring + rebuilding C objects"
+    sub "was: $(cat "$stamp" 2>/dev/null || echo '(not recorded)')"
+    sub "now: $cflags"
+    reconfigure=1; objclean=1
+  fi
+
   ( cd "$SRC"
     [ -x ./configure ] || { log "autogen.sh"; ./autogen.sh; }
-    if [ ! -f Makefile ] || [ "${RECONFIGURE:-0}" = 1 ]; then
+    if [ ! -f Makefile ] || [ "$reconfigure" = 1 ]; then
       ./configure "${args[@]}"
     else
       sub "Makefile present -- skipping configure (RECONFIGURE=1 to force)"
     fi )
+  if [ "$objclean" = 1 ]; then
+    local d
+    for d in src lib lib-src; do build_make "$SRC/$d" clean >/dev/null; done
+  fi
+  # Written only after configure succeeded, so a failed run retries next time.
+  printf '%s\n' "$cflags" >"$stamp"
 }
 
 stage_build() {
@@ -305,6 +347,38 @@ stage_build() {
   log "Native-compiling all lisp (AOT) -- gmake's built-in trigger is unreliable here"
   build_make "$SRC/lisp" -j"$JOBS" compile-eln-aot EMACS="$SRC/src/emacs" ELNDONE=""
   echo aot > "$SRC/.aot-mode"   # so a later SKIP_AOT build knows to clear this bulk
+}
+
+# Link the build's debug info into a standalone .dSYM beside the deployed app.
+# REQUIRED for -g3 to be worth anything after the fact: macOS does not put DWARF in
+# the executable. The linker records a debug MAP -- absolute paths to the .o files
+# that hold the real DWARF (OSO stabs) -- so lldb resolves file:line only while the
+# worktree's objects are still there, untouched, from THAT exact build. The next
+# `prepare` overwrites them, and the app you are still running silently degrades to
+# function-names-only... which is precisely when last week's crash report needs a
+# line number. dsymutil copies the DWARF out of the .o files into a .dSYM bundle
+# matched to the binary by UUID, which lldb and Crash Reporter find automatically
+# when it sits next to the app. Kept BESIDE the bundle, not inside it: inside, it
+# would bloat every copy of the app and get swept into the signature for no reason.
+# Built to a temp path and swapped in, so a failed run never leaves a truncated
+# .dSYM that tools would trust. SKIP_DSYM=1 opts out.
+make_dsym() {
+  local binary="$1" out="$2"
+  if [ "${SKIP_DSYM:-0}" = 1 ]; then
+    sub "SKIP_DSYM=1 -- no .dSYM (crash reports will show function names, not file:line)"
+    return
+  fi
+  command -v dsymutil >/dev/null || { sub "warning: dsymutil not found -- skipping .dSYM"; return; }
+  log "Linking debug info into $(basename "$out")"
+  rm -rf "$out.tmp"
+  if dsymutil "$binary" -o "$out.tmp"; then
+    rm -rf "$out"
+    mv "$out.tmp" "$out"
+    sub "$(du -sh "$out" | cut -f1) at $out"
+  else
+    rm -rf "$out.tmp"
+    sub "warning: dsymutil failed -- crash reports will symbolicate to function names only"
+  fi
 }
 
 stage_package() {
@@ -377,6 +451,10 @@ stage_package() {
   # re-introduces the load-prefer-newer jka-compr recursion in the *deployed* app.
   cp -Rp "$app_src" "$APPS_DIR/Emacs.app"
   local app="$APPS_DIR/Emacs.app"
+
+  # Signing does not touch LC_UUID and cp preserves it, so the deployed binary still
+  # matches the worktree objects -- link its debug info now, while they are current.
+  make_dsym "$app/Contents/MacOS/Emacs" "$APPS_DIR/Emacs.app.dSYM"
 
   # Put the executables on PATH, replacing any prior wrappers/symlinks.
   mkdir -p "$BIN_DIR"
