@@ -401,7 +401,6 @@ stage_package() {
   # install wrote .el.gz is racy (touch truncates to whole seconds, so a sub-second-
   # later .el.gz can still win), so sleep into a strictly later second first -- then
   # the .elc are unambiguously newest, with natural timestamps (no epoch-pinned dates).
-  # .eln native selection is keyed on the source hash, not mtime, so it's unaffected.
   # (cp -Rp at deploy preserves this ordering; plain cp -R would flatten it.)
   #
   # Only needed when compression is on: with --without-compress-install (DEBUG) there
@@ -414,6 +413,20 @@ stage_package() {
   else
     sub "no .el.gz in bundle (compress-install off) -- .elc already newer, skipping mtime bump"
   fi
+  # The .eln must in turn be newer than the .elc, ALWAYS: when Emacs loads an .elc it
+  # takes the bundled .eln only if the eln's mtime is >= the elc's (maybe_swap_for_eln1
+  # in lread.c; the source hash in the eln name selects the candidate, the mtime
+  # decides whether it is trusted). An older eln is silently skipped, the library is
+  # JIT-compiled into the user's eln-cache, and comp-clean-up-stale-eln then DELETES
+  # the same-hash eln from every dir on native-comp-eln-load-path -- the bundle's
+  # included, since it is user-writable. That throws the whole AOT away one library
+  # at a time and breaks the codesign seal. Touching the elns last (after the .elc
+  # bump above, and after install in the DEBUG branch, where install order between
+  # lisp and install-eln is not guaranteed) makes them strictly newest. Searched from
+  # Contents/: at this point the eln store is still at Contents/Frameworks/native-lisp
+  # (relocate_native_lisp moves it under Resources later, preserving mtimes).
+  log "Bumping .eln mtimes so they stay newer than their .elc"
+  find "$app_src/Contents" -name '*.eln' -exec touch {} +
   [ -x "$app_src/Contents/MacOS/Emacs" ] || die "Emacs binary missing in $app_src"
   local res="$app_src/Contents/Resources"
 

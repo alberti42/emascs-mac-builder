@@ -172,6 +172,16 @@ interactions. The long comments above each are the source of truth — **do not
   it wins, with natural timestamps. The deploy `cp -Rp` preserves the ordering —
   plain `cp -R` would flatten it. Skipped entirely when the bundle has no `.el.gz`
   (i.e. `DEBUG`/`--without-compress-install`) — `.elc` is already newer than plain `.el`.
+- **`.eln` mtime bump** (`stage_package`, always, right after the `.elc` bump): Emacs
+  loads a bundled `.eln` in place of its `.elc` only if the eln's mtime is `>=` the
+  elc's (`maybe_swap_for_eln1`, lread.c). An older eln is skipped, the library is
+  JIT-compiled into the user's `eln-cache`, and `comp-clean-up-stale-eln` then deletes
+  the same-hash eln from **every** directory on `native-comp-eln-load-path`, the
+  user-writable bundle included — discarding the AOT output library by library and
+  breaking the codesign seal (`--verify --strict` reports the deleted elns as missing).
+  So every `.eln` in the bundle is `touch`ed last (searched from `Contents/`, since the
+  store is still under `Frameworks/` at that point), making it strictly newest; `cp -Rp`
+  at deploy preserves that too.
 - **`emacs` on PATH is a wrapper, not a symlink**: a self-contained `--with-ns`
   build locates its bundle from the launch path, which isn't canonicalized; a
   symlink outside the bundle breaks bundle detection ("loadup.el not found"). The
