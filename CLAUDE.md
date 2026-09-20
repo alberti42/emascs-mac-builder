@@ -143,6 +143,18 @@ interactions. The long comments above each are the source of truth — **do not
   CFLAGS change renames the eln version directory and every `.eln` is recompiled (the
   full pipeline clears `native-lisp` anyway). The stamp is written only after
   `configure` succeeds.
+- **Homebrew keg drift detection** (`stale_kegs`, `stage_configure`): the `.cflags` stamp
+  covers only the flags the script chooses. configure resolves the dependencies through
+  pkg-config, which answers with **versioned** keg paths
+  (`-isystem /opt/homebrew/Cellar/glib/2.90.0/include`), and those are frozen into
+  `src/Makefile`. A later `brew upgrade` moves the keg and nothing in the worktree
+  notices — the build then stops at the first include it cannot find (`process.c`:
+  `'glib.h' file not found`, once the old keg is gone) or, worse, compiles against a keg
+  Homebrew has not cleaned up yet and crashes at runtime against the new dylib. So
+  `stale_kegs` reads the kegs back out of `src/Makefile` — which lists exactly the
+  formulas this build links — and compares each recorded version with what
+  `$HB/opt/<formula>` points at today. Any drift reconfigures **and** runs the same
+  scoped `clean`. No stamp file: the Makefile is the record of what configure resolved.
 - **`DEBUG=1` fast/debug build**: implies `SKIP_AOT`; compiles C at `-O0 -g3` (nothing
   inlined or reordered, so stepping is accurate and locals aren't elided) instead of
   the release `-O2 -g3`; and passes

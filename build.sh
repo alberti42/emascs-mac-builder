@@ -203,6 +203,35 @@ build_make() {
   ( cd "$dir" && HOME="$BUILD_HOME" XDG_CONFIG_HOME="$BUILD_HOME/.config" gmake "$@" )
 }
 
+# Homebrew kegs recorded by the last configure that have since moved.  Prints one
+# "formula was -> now" line per drift; prints nothing when everything still matches.
+#
+# configure resolves every dependency through pkg-config, and pkg-config answers with
+# VERSIONED keg paths (-isystem /opt/homebrew/Cellar/glib/2.90.0/include).  Those get
+# frozen into src/Makefile.  A later `brew upgrade` moves the keg to a new version
+# directory and nothing in the worktree notices: with --disable-dependency-tracking the
+# objects do not depend on the Makefile, and the .cflags stamp below only covers the
+# flags THIS script chooses, not the ones pkg-config supplied.  The build then either
+# stops at the first include it cannot find (process.c: 'glib.h' file not found, once
+# the old keg is gone) or -- worse -- compiles against a keg Homebrew has not cleaned up
+# yet and crashes at runtime against the new dylib.
+#
+# So read the kegs back out of src/Makefile, which lists exactly the formulas this build
+# links, and compare each recorded version with what $HB/opt/<formula> points at today.
+# No stamp file: the Makefile IS the record of what configure resolved.  (config.status
+# holds the same paths, but wraps long lines with backslashes, which splits them.)
+stale_kegs() {
+  [ -f "$SRC/src/Makefile" ] || return 0
+  local keg formula version current
+  while read -r keg; do
+    formula="${keg%%/*}"; version="${keg#*/}"
+    current="$(readlink "$HB/opt/$formula" 2>/dev/null || true)"
+    current="${current##*/}"
+    [ "$current" = "$version" ] || printf '%s %s -> %s\n' "$formula" "$version" "${current:-(gone)}"
+  done < <(grep -oh -- "$HB/Cellar/[^ \"]*" "$SRC/src/Makefile" |
+             sed -n "s|^$HB/Cellar/\([^/]*\)/\([^/]*\).*|\1/\2|p" | sort -u)
+}
+
 stage_configure() {
   local opt_mode=release
   [ "${DEBUG:-0}" = 1 ] && opt_mode=debug
@@ -267,6 +296,15 @@ stage_configure() {
     log "CFLAGS changed since the last configure -- reconfiguring + rebuilding C objects"
     sub "was: $(cat "$stamp" 2>/dev/null || echo '(not recorded)')"
     sub "now: $cflags"
+    reconfigure=1; objclean=1
+  fi
+  # Same treatment for a Homebrew upgrade underneath us (see stale_kegs): the headers
+  # moved, so the recorded include paths and every object built from them are stale.
+  local drift line
+  drift="$(stale_kegs)"
+  if [ -n "$drift" ]; then
+    log "Homebrew kegs moved since the last configure -- reconfiguring + rebuilding C objects"
+    while read -r line; do sub "$line"; done <<<"$drift"
     reconfigure=1; objclean=1
   fi
 
