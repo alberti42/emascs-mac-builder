@@ -41,6 +41,10 @@ including the named one (see the `case` dispatch at the bottom of the script).
   Note `emacs` is installed as a wrapper script (not a symlink) so the
   self-contained bundle is located from its launch path; `emacsclient` is **also**
   a wrapper, so it can `export TERM=xterm-emacs` (see the terminfo note below).
+- `EMACS_SIGN_IDENTITY` — `codesign` identity (default `-`, ad-hoc). Set it to a
+  certificate (e.g. `Developer ID Application: Name (TEAMID)`) so TCC grants such as
+  Full Disk Access survive rebuilds: an ad-hoc signature's designated requirement is
+  the cdhash, which every rebuild changes. Signed without the hardened runtime.
 - `SKIP_PREPARE=1` — reuse the worktree untouched (no reset, no re-patch).
 - `SKIP_DSYM=1` — skip the `dsymutil` pass at deploy (no `Contents/MacOS/Emacs.dSYM`).
 - `RECONFIGURE=1` — force `autogen.sh` + `./configure` to re-run.

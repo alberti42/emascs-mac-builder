@@ -72,6 +72,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ICONS_DIR="${EMACS_ICONS_DIR:-$SCRIPT_DIR/assets/icons}"   # loose <name>.icon sources compiled at build time
 TERMINFO_SRC="${EMACS_TERMINFO_SRC:-$SCRIPT_DIR/assets/terminfo/xterm-emacs.terminfo}"  # custom terminfo installed for emacsclient
 PY_VENV="${EMACS_PY_VENV:-$BUILD_DIR/venv}"                # venv (pinned PyYAML) for the build.yml reader
+SIGN_ID="${EMACS_SIGN_IDENTITY:--}"                        # codesign identity; '-' = ad-hoc (see stage_package)
 
 # Separate worktree per optimization mode (like an IDE's Debug/Release dirs), so
 # switching modes never churns the other's object files. Release keeps the original
@@ -493,11 +494,21 @@ stage_package() {
   # map points at are current right now; LC_UUID is untouched by signing and cp.
   make_dsym "$app_src/Contents/MacOS/Emacs" "$app_src/Contents/MacOS/Emacs.dSYM"
 
-  log "Signing (ad-hoc, required on recent macOS)"
+  # TCC (Full Disk Access, Automation, ...) stores a grant against the app's
+  # designated requirement. An ad-hoc signature's requirement is the cdhash, so every
+  # rebuild invalidates the grant. A certificate identity (EMACS_SIGN_IDENTITY, e.g.
+  # "Developer ID Application: Name (TEAMID)") makes it identifier + certificate,
+  # which every rebuild signed with that certificate satisfies. No --options runtime:
+  # the hardened runtime enforces library validation, and the .eln files Emacs
+  # compiles into the user's eln-cache are not signed. --timestamp=none keeps the
+  # build offline (a secure timestamp is only needed for notarization).
+  local sign_desc="ad-hoc"
+  [ "$SIGN_ID" = - ] || sign_desc="$SIGN_ID"
+  log "Signing ($sign_desc)"
   # Sign + strict-verify; surface failure instead of swallowing it silently.
-  if codesign --force --deep --sign - "$app_src" >/dev/null 2>&1 \
+  if codesign --force --deep --timestamp=none --sign "$SIGN_ID" "$app_src" >/dev/null 2>&1 \
      && codesign --verify --strict "$app_src" >/dev/null 2>&1; then
-    sub "ad-hoc signature OK (strict verify passed)"
+    sub "signature OK (strict verify passed)"
   else
     sub "warning: codesign/verify failed -- run 'codesign --verify --strict' for detail"
   fi
